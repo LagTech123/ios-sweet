@@ -19,6 +19,12 @@
 #define IMEM_RESTART_REASON	0x066bf65cUL	/* MSM8996 DT: qcom,msm-imem@66bf000 restart_reason@65c */
 #define RESTART_BOOTLOADER	0x77665500U
 #define PSHOLD			0x004ab000UL	/* MSM8996 DT: restart@4ab000 pshold-base */
+#define MSM_WDT			0x09830000UL	/* MSM8996 DT: qcom,wdt@9830000 */
+#define WDT_HZ			32765UL		/* upstream qcom watchdog_v2 default */
+#define WDT_RST			0x04
+#define WDT_EN			0x08
+#define WDT_BARK_TIME		0x10
+#define WDT_BITE_TIME		0x14
 
 #define GICD_BASE		0x09bc0000UL
 #define GICR_BASE		0x09c00000UL
@@ -233,6 +239,16 @@ static void arm_xnu_watchdog(void)
 	__asm__ volatile("dsb sy" ::: "memory");
 	ret = smc(PSCI_CPU_ON, cpu_mpidr[3], (uintptr_t)secondary_entry, 3);
 	plog_hex("WDT cpu_on", (uint32_t)ret);
+
+	/* Backup: the secure watchdog resets the SoC if CPU3 cannot run. */
+	wr32(MSM_WDT + WDT_EN, 0);
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr32(MSM_WDT + WDT_BARK_TIME, 60 * WDT_HZ);
+	wr32(MSM_WDT + WDT_BITE_TIME, 63 * WDT_HZ);
+	wr32(MSM_WDT + WDT_EN, 1);
+	wr32(MSM_WDT + WDT_RST, 1);
+	__asm__ volatile("dsb sy" ::: "memory");
+	plog_str("WDT hw armed (63s)\n");
 	plog_commit();
 }
 

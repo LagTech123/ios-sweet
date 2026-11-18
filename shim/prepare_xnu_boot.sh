@@ -10,7 +10,9 @@ WORK=${WORK:-/tmp/kagura-xnu-final}
 CMDLINE=${CMDLINE:-'debug=0xc serial=3 cpus=1 keepsyms=1'}
 
 mkdir -p "$WORK"
-cp "$KERNEL" "$WORK/kernel"
+if [ "$(readlink -f "$KERNEL")" != "$(readlink -f "$WORK/kernel")" ]; then
+	cp "$KERNEL" "$WORK/kernel"
+fi
 cd "$ROOT"
 python3 tools/mkadt.py "$WORK/kagura-full.adt"
 python3 - "$WORK/kagura-full.adt" "$WORK/kagura.adt" <<'PY'
