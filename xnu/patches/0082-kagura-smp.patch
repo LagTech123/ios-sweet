@@ -1,0 +1,20 @@
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -73,10 +73,14 @@
+ 	if (*(const uint32_t *)reg->getBytesNoCopy() != cpu->phys_id) {
+ 		return false;
+ 	}
+-	/* MPIDR Aff1 = core: 0x000-0x500 A55, 0x600/0x700 A76 */
+-	if (cpu->phys_id > 0x700 || (cpu->phys_id & 0xff) != 0 ||
++	/* Sweet: Aff1 = core (0x000-0x500 A55, 0x600/0x700 A76).
++	 * Kagura: two clusters, Aff1:Aff0 = 0x0, 0x1, 0x100, 0x101. */
++	bool sweet_mpidr = cpu->phys_id <= 0x700 && (cpu->phys_id & 0xff) == 0;
++	bool kagura_mpidr = cpu->phys_id == 0x0 || cpu->phys_id == 0x1 ||
++	    cpu->phys_id == 0x100 || cpu->phys_id == 0x101;
++	if ((!sweet_mpidr && !kagura_mpidr) ||
+ 	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
+-		panic("SWEET CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
++		panic("SMP CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
+ 		    cpu->cpu_id, cpu->phys_id, topology->num_cpus);
+ 	}
+ 	if (!IOCPU::start(provider)) {
