@@ -9,32 +9,32 @@ import hashlib, os, struct, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adt  # noqa: E402
 
-# Kernel-managed RAM: above every Qualcomm XPU carve-out (see NOTES.md)
-PHYS_BASE = 0xb0000000
-MEM_SIZE = 0x4d000000
+# Kernel-managed RAM: clean upper DDR bank (0x1_00000000..0x15eabffff).
+# All fixed Qualcomm carve-outs (splash, modem, pstore, dynamic pools) are in
+# the low bank, so keep XNU out of 0x80000000..0xdfffffff.
+PHYS_BASE = 0x100000000
+MEM_SIZE = 0x5eac0000
 # Panic log buffer, carved from the TOP of the dram range and exposed to XNU as
 # /pram + /chosen/embedded-panic-log-size. Without it, pe_init.c's
 # check_for_panic_log() leaves gPanicBase == 0, debug_log_init() bails out twice
 # and the kernel hangs right after "kdp_core zlib memory" — reproduced on QEMU
 # and independently on ios-fajita.
 PANIC_LOG_SIZE = 0x100000
-# --highmem (phone only): the whole upper DDR bank. The live FDT memory node is
-# <0x80000000 2G>, <0x1_00000000 0xfcc00000>; every fixed reserved-memory
-# carve-out is in the low bank and the dynamic pools are limited below 4G.
-HIGH_PHYS_BASE = 0x100000000
-HIGH_MEM_SIZE = 0xfcc00000
+# --highmem is now the same clean upper bank; kept for CLI compatibility.
+HIGH_PHYS_BASE = PHYS_BASE
+HIGH_MEM_SIZE = MEM_SIZE
 # /arm-io children are relative to this; it must not be 0 (serial_init bails)
 SOC_BASE = 0x01000000
 
-GICD, GICD_SIZE = 0x17a00000, 0x10000
-GICR, GICR_SIZE = 0x17a60000, 0x100000
-FB, FB_SIZE = 0x9c000000, 0x1700000
+GICD, GICD_SIZE = 0x09bc0000, 0x10000
+GICR, GICR_SIZE = 0x09c00000, 0x100000
+FB, FB_SIZE = 0x83401000, 0x23ff000
 SWEET_ECID = 0x5357454554000001  # 'SWEET' + 1, synthetic
-FB_W, FB_H, FB_STRIDE = 1080, 2400, 1080 * 4
-# Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
-UFS, UFS_SIZE = 0x01d84000, 0x3000
+FB_W, FB_H, FB_STRIDE = 1080, 1920, 4352
+# Kagura uses eMMC/SDHCI (soc/sdhci@7464900), not UFS. Do not publish a
+# storage node until the eMMC driver exists.
 TIMEBASE = 19200000
-VTIMER_INTID = 19
+VTIMER_INTID = 27
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
 QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
 QEMU_VTIMER_INTID = 27
@@ -92,8 +92,8 @@ def build(seed=None, qemu=False, highmem=False):
         ('random-seed', seed),
         ('debug-enabled', u32(1)),
         ('embedded-panic-log-size', u32(PANIC_LOG_SIZE)),
-        ('firmware-version', cstr('sweet-shim')),
-        ('system-firmware-version', cstr('sweet-shim')),
+        ('firmware-version', cstr('kagura-shim')),
+        ('system-firmware-version', cstr('kagura-shim')),
         # iBoot's SHA-384 of the boot manifest; /sbin/mount -P 1 exits unless
         # it exists (bind mounts /private/preboot/<hex>/usr/standalone/firmware,
         # tolerating a missing directory). Fixed stand-in value.
@@ -129,27 +129,26 @@ def build(seed=None, qemu=False, highmem=False):
         # with CSR_ALLOW_UNRESTRICTED_FS (vm_unix.c shared region checks).
         node('asmb', [ph(), ('lp-sip0', u64(0x6f)), ('lp-sip1', u32(1))])])
 
-    # SWEET SMP: all eight cores in physical-core order (0-5 Cortex-A55,
-    # 6-7 Cortex-A76), one homogeneous cluster. The kernel defaults to one
-    # and uses cpus=N to select an initial prefix (N <= 8).
-    # QEMU retains its original single-CPU tree: its MPIDRs differ from sweet.
+    # Kagura SMP: four Kryo cores, MPIDR 0x0/0x1 (cluster 0) and
+    # 0x100/0x101 (cluster 1). QEMU retains its original single-CPU tree.
+    cpu_mpidr = [0x0, 0x1, 0x100, 0x101]
     cpu_nodes = []
-    for core in range(1 if qemu else 8):
+    for core, mpidr in enumerate(cpu_mpidr if not qemu else [0]):
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
-            ('compatible', cstr('qcom,kryo470') + cstr('ARM,v8')),
-            ('reg', u32(core << 8)),  # actual MPIDR Aff1:Aff0, NOT logical ID
+            ('compatible', cstr('qcom,kryo') + cstr('ARM,v8')),
+            ('reg', u32(mpidr)),  # actual MPIDR Aff1:Aff0, NOT logical ID
             ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
-            ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
+            ('cluster-id', u32(0 if core < 2 else 1)),
             ('cluster-type', u32(0)),  # homogeneous CLUSTER_TYPE_SMP, not AMP
-            ('die-cluster-id', u32(0)),
-            ('cluster-core-id', u32(core)),
-            ('l2-cache-id', u32(core)),  # distinct per-core L2 nodes in live FDT
+            ('die-cluster-id', u32(0 if core < 2 else 1)),
+            ('cluster-core-id', u32(core & 1)),
+            ('l2-cache-id', u32(0 if core < 2 else 1)),
             ('l3-cache-id', u32(0)),     # shared L3
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(2304000000 if core >= 6 else 1804800000)),
+            ('clock-frequency', u32(2150400000 if core >= 2 else 1593600000)),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(timebase)),
@@ -185,8 +184,8 @@ def build(seed=None, qemu=False, highmem=False):
             ph(),
             ('device_type', cstr('display-subsystem')),
             ('compatible', cstr('sweet,display')),
-            ('canvas-width', u32(1125)),
-            ('canvas-height', u32(2436)),
+            ('canvas-width', u32(1080)),
+            ('canvas-height', u32(1920)),
         ])])
 
     fbcon = node('sweet-fbcon', [
@@ -195,13 +194,6 @@ def build(seed=None, qemu=False, highmem=False):
         ('width', u32(FB_W)),
         ('height', u32(FB_H)),
         ('stride', u32(FB_STRIDE)),
-    ])
-
-    # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
-    ufs = node('sweet-ufs', [
-        ph(),
-        ('compatible', cstr('qcom,ufshc')),
-        ('reg', u64(UFS, UFS_SIZE)),
     ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
@@ -228,17 +220,18 @@ def build(seed=None, qemu=False, highmem=False):
 
     # Identity of the iPhone X whose userland runs here: compatible[0] is
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
-    # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
+    # (iPhone10,3). 'xiaomi,sweet' stays until SweetPlatformExpert matches
+    # 'sony,kagura'.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('qcom,sm7150') + cstr('AppleARM')),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('sony,kagura') + cstr('qcom,msm8996') + cstr('xiaomi,sweet') + cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 /*
  * Just enough flattened-device-tree parsing to find what ABL put in
- * /chosen (initrd location). Big-endian, 4-byte aligned tokens.
+ * /chosen (initrd location, bootargs). Big-endian, 4-byte aligned tokens.
  */
 #include "fdt.h"
 
@@ -78,6 +78,53 @@ int fdt_chosen_u64(uintptr_t fdt, const char *prop, uint64_t *out)
 		case FDT_NOP:
 			break;
 		default:	/* FDT_END or garbage */
+			return 0;
+		}
+	}
+}
+
+int fdt_chosen_str(uintptr_t fdt, const char *prop, char *buf, int max)
+{
+	if (!fdt || be32(fdt) != FDT_MAGIC || !buf || max <= 0)
+		return 0;
+	uintptr_t p = fdt + be32(fdt + 8);
+	uintptr_t strings = fdt + be32(fdt + 12);
+	int depth = 0, in_chosen = 0;
+
+	for (;;) {
+		uint32_t tok = be32(p);
+		p += 4;
+		switch (tok) {
+		case FDT_BEGIN_NODE: {
+			const char *name = (const char *)p;
+			depth++;
+			in_chosen = depth == 2 && streq(name, "chosen");
+			p = align4(skip_str(p));
+			break;
+		}
+		case FDT_END_NODE:
+			if (in_chosen)
+				return 0;
+			depth--;
+			break;
+		case FDT_PROP: {
+			uint32_t len = be32(p), nameoff = be32(p + 4);
+			uintptr_t val = p + 8;
+			if (in_chosen && streq((const char *)(strings + nameoff), prop)) {
+				int n = (int)len;
+				if (n > max - 1)
+					n = max - 1;
+				for (int i = 0; i < n; i++)
+					buf[i] = *(volatile char *)(val + (uintptr_t)i);
+				buf[n] = 0;
+				return 1;
+			}
+			p = align4(val + len);
+			break;
+		}
+		case FDT_NOP:
+			break;
+		default:
 			return 0;
 		}
 	}

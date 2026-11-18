@@ -11,6 +11,7 @@
 #include "console.h"
 #include "fdt.h"
 #include "loader.h"
+#include "plog.h"
 
 #define BOOT_LINE_LENGTH	608
 #define PAGE_16K		0x4000UL
@@ -80,16 +81,30 @@ const char *loader_boot(uintptr_t dtb)
 {
 	uint64_t rd_start, rd_end;
 
+	plog_str("LOADER entry\n");
 	if (!fdt_chosen_u64(dtb, "linux,initrd-start", &rd_start) ||
-	    !fdt_chosen_u64(dtb, "linux,initrd-end", &rd_end))
+	    !fdt_chosen_u64(dtb, "linux,initrd-end", &rd_end)) {
+		plog_str("LOADER no initrd\n");
+		plog_commit();
 		return "no initrd in /chosen";
+	}
 	con_hex2("INITRD", "lo=", rd_start, "hi=", rd_end);
+	plog_hex("initrd.lo", rd_start);
+	plog_hex("initrd.hi", rd_end);
+	plog_commit();
 
 	const struct payload *p = (const struct payload *)rd_start;
-	if (!magic_ok(p->magic))
+	if (!magic_ok(p->magic)) {
+		plog_str("LOADER no SWEETXNU\n");
+		plog_commit();
 		return "no SWEETXNU payload";
-	if (p->version != 1 || (p->adt_off & 7) || (rd_start & 7))
+	}
+	if (p->version != 1 || (p->adt_off & 7) || (rd_start & 7)) {
+		plog_hex("LOADER bad header version", p->version);
+		plog_commit();
 		return "bad payload header";
+	}
+	plog_str("LOADER payload ok\n");
 
 	uint64_t pa_of_va_base = p->phys_base - p->virt_base;	/* pa = va + this */
 	con_hex2("PHYS", "base=", p->phys_base, "size=", p->mem_size);
@@ -97,16 +112,22 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex("ENTRY", p->entry_va);
 
 	/* The payload must not overlap where the kernel goes. */
-	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size)
+	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size) {
+		plog_str("LOADER ramdisk overlap\n");
+		plog_commit();
 		return "ramdisk overlaps kernel memory";
+	}
 
 	for (uint32_t i = 0; i < p->nsegs; i++) {
 		const struct payload_seg *s = &p->segs[i];
 		uintptr_t dst = s->vmaddr + pa_of_va_base;
+		plog_hex("seg.dst", dst);
+		plog_hex("seg.size", s->file_size);
 		copy64(dst, rd_start + s->file_off, s->file_size);
 		if (s->vmsize > s->file_size)
 			zero64(dst + ((s->file_size + 7) & ~7UL), s->vmsize - ((s->file_size + 7) & ~7UL));
 	}
+	plog_commit();
 	con_hex2("SEGS", "n=", p->nsegs, "end=", p->kernel_end + pa_of_va_base);
 
 	/* ADT, then boot_args, behind the kernel; everything below topOfKernelData is ours. */
@@ -137,6 +158,9 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex2("BOOTARG", "pa=", ba_pa, "top=", top);
 
 	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
+	plog_hex("XNU entry", entry_pa);
+	plog_str("LOADER jumping\n");
+	plog_commit();
 	con_hex("JUMP", entry_pa);
 	con_str("XNU", "jumping (fbcon clears screen)");
 

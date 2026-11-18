@@ -4,8 +4,15 @@
  */
 #include "console.h"
 #include "font.h"
+#ifdef KAGURA
+#include "splash.h"
+#endif
 
+#ifdef KAGURA
+#define SCALE		2
+#else
 #define SCALE		3
+#endif
 #define CH_W		(8 * SCALE)
 #define CH_H		(16 * SCALE)
 #define MARGIN		24
@@ -25,6 +32,28 @@ void con_clear(uint32_t bg)
 	con_bg = bg;
 	row = 0;
 }
+
+#ifdef KAGURA
+/* Paint the pre-rendered boot splash, including the eight padding pixels. */
+void con_splash(void)
+{
+	const uint32_t *p = splash_rle;
+	uint32_t left = SPLASH_PIXELS;
+	uint32_t i = 0;
+
+	while (left) {
+		uint32_t n = *p++;
+		uint32_t c = *p++;
+		if (n > left)
+			n = left;
+		for (uint32_t j = 0; j < n; j++)
+			con_fb[i++] = c;
+		left -= n;
+	}
+	con_bg = BLACK;
+	row = 0;
+}
+#endif
 
 static void put_char(int col, char ch, uint32_t fg)
 {

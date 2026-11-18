@@ -10,7 +10,11 @@
 #include "console.h"
 #include "mmu.h"
 #include "loader.h"
+#include "plog.h"
+#include "fdt.h"
+#ifndef KAGURA
 #include "ufs.h"
+#endif
 
 #define IMEM_RESTART_REASON	0x066bf65cUL	/* MSM8996 DT: qcom,msm-imem@66bf000 restart_reason@65c */
 #define RESTART_BOOTLOADER	0x77665500U
@@ -65,6 +69,7 @@ static volatile uint64_t sec_mpidr[NR_CPUS];
 static volatile uint64_t sec_probe[4];	/* CPU1 redistributor write test */
 static volatile uint32_t irq_count, irq_other, irq_last;
 static volatile int irq_src;
+static volatile int watchdog_armed;
 
 /* ICC_SGI1R_EL1 value targeting the calling core only. */
 static uint64_t sgi_self(unsigned id)
@@ -105,6 +110,8 @@ static void delay_ms(unsigned ms)
 
 static void __attribute__((noreturn)) reset(unsigned after_s)
 {
+	plog_str("RESET\n");
+	plog_commit();
 	con_skip();
 	con_str("RESET", after_s > 20 ? "in 40s" : "in 20s");
 	delay_ms(after_s * 1000);
@@ -145,6 +152,11 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 		return;
 	}
 	con_clear(BLUE);
+	plog_str("PANIC\n");
+	plog_hex("slot", slot);
+	plog_hex("esr", rsr("esr_el1"));
+	plog_hex("elr", rsr("elr_el1"));
+	plog_commit();
 	switch (slot & 3) {
 	case 0: con_str("PANIC", "SYNC"); break;
 	case 1: con_str("PANIC", "IRQ"); break;
@@ -169,6 +181,13 @@ static uintptr_t find_gicr(void);
 
 void secondary_main(uint64_t idx)
 {
+	if (watchdog_armed && idx == 3) {
+		plog_str("WATCHDOG armed (40s)\n");
+		plog_commit();
+		delay_ms(40000);
+		plog_str("WATCHDOG reset\n");
+		reset(0);
+	}
 	sec_mpidr[idx] = rsr("mpidr_el1") | (1ULL << 63);
 	if (idx == 1) {
 		uintptr_t r = find_gicr();
@@ -203,6 +222,18 @@ static void __attribute__((unused)) test_smp(void)
 			con_hex2(label, "ret=", (uint32_t)ret[i], "mpidr=",
 				 (uint32_t)sec_mpidr[i] | (sec_mpidr[i] ? 0 : 0xdead0000));
 	}
+}
+
+/* Safety net for autonomous XNU tests: reset if the kernel never returns. */
+static void arm_xnu_watchdog(void)
+{
+	uint64_t ret;
+
+	watchdog_armed = 1;
+	__asm__ volatile("dsb sy" ::: "memory");
+	ret = smc(PSCI_CPU_ON, cpu_mpidr[3], (uintptr_t)secondary_entry, 3);
+	plog_hex("WDT cpu_on", (uint32_t)ret);
+	plog_commit();
 }
 
 /* ---- GIC + timer ---- */
@@ -278,6 +309,11 @@ static void irq_window(const char *label, uintptr_t r, int src)
 	con_hex2(" pre", "pend=", pend, "act=", act);
 	con_hex2(" pre", "isr=", isr, "hppi=", hppi);
 	con_hex2(" pre", "tctl=", ist, "last=", irq_last);
+	plog_str(label);
+	plog_hex(" irqs", irq_count);
+	plog_hex(" other", irq_other);
+	plog_hex(" last", irq_last);
+	plog_commit();
 }
 
 static void test_gic(void)
@@ -377,14 +413,57 @@ void shim_main(uint64_t dtb)
 	struct mmu_info mi;
 
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
+	plog_init();
+	plog_str("KAGURA_SHIM entry v2\n");
+	plog_hex("dtb", dtb);
+	plog_hex("mpidr", rsr("mpidr_el1"));
+	char bootargs[192];
+	if (fdt_chosen_str(dtb, "bootargs", bootargs, (int)sizeof bootargs)) {
+		plog_str("bootargs=");
+		plog_str(bootargs);
+		plog_str("\n");
+	} else {
+		plog_str("bootargs absent\n");
+	}
+	plog_commit();
+#ifdef KAGURA
+	fbsnap_decode();
+#endif
 	stage = "loader";
+#ifdef KAGURA
+	con_splash();
+	plog_str("splash drawn\n");
+	plog_commit();
+#else
 	con_clear(RED);
+#endif
+#ifdef KAGURA
+	con_str("SHIM", "kagura milestone: xnu loader");
+#else
 	con_str("SHIM", "sweet milestone 4: xnu loader");
+#endif
 	con_skip();
+	arm_xnu_watchdog();
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
+	plog_str("loader=");
+	plog_str(why);
+	plog_str("\n");
+	plog_commit();
 	con_skip();
 
+#ifdef KAGURA
+	/* Kagura has eMMC, not UFS. With no payload, run the GIC/timer
+	 * diagnostics on the kagura splash framebuffer and reset. */
+	stage = "kagura diag";
+	con_skip();
+	test_gic();
+	con_skip();
+	con_str("SHIM", "kagura diagnostics done");
+	plog_str("diag done\n");
+	plog_commit();
+	reset(20);
+#else
 	/* No payload: probe the internal UFS while the MMU is still off. */
 	stage = "ufs";
 	test_ufs();
@@ -393,6 +472,7 @@ void shim_main(uint64_t dtb)
 	con_str("UFS", "probe done, reset in ~3 min");
 	delay_ms(180000);
 	reset(20);
+#endif
 
 	stage = "fill off";
 	uint64_t fill_off = ticks_fill(RED);
