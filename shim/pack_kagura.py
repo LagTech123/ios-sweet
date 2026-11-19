@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Pack a kagura shim Image into the stock Xperia boot.img v0 header.
 
-With an optional third argument, the file is a SWEETXNU payload: it becomes
-the (gzip-compressed) ramdisk, and the appended DTB gets /chosen
-linux,initrd-start/end pointing at the decompressed ramdisk address.
+With an optional third argument, the file is a payload embedded in the
+ramdisk and /chosen linux,initrd-start/end are patched to point at it.
+SWEETXNU payloads use normal gzip; KAG2TWRP payloads use gzip made of stored
+deflate blocks, which the shim can unpack in place if ABL did not already
+decompress the ramdisk.
 """
 import gzip
 import hashlib
@@ -15,6 +17,20 @@ import tempfile
 import zlib
 
 STOCK = '/mnt/d/xz/dump/boot.img'
+
+
+def gzip_stored(data):
+    """Valid gzip stream made only of stored deflate blocks; the shim can
+    unpack it in place with ~20 lines of code."""
+    out = bytearray(b'\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03')
+    for off in range(0, len(data), 65535):
+        chunk = data[off:off + 65535]
+        final = 1 if off + len(chunk) == len(data) else 0
+        out.append(final)
+        out += struct.pack('<HH', len(chunk), 0xffff ^ len(chunk))
+        out += chunk
+    out += struct.pack('<II', zlib.crc32(data) & 0xffffffff, len(data) & 0xffffffff)
+    return bytes(out)
 
 
 def patch_dtb(dtb, rd_start, rd_end):
@@ -37,7 +53,7 @@ def patch_dtb(dtb, rd_start, rd_end):
 
 def main():
     if len(sys.argv) not in (3, 4):
-        raise SystemExit(f'usage: {sys.argv[0]} Image out-boot.img [SWEETXNU-payload]')
+        raise SystemExit(f'usage: {sys.argv[0]} Image out-boot.img [payload]')
     img_path, out_path = sys.argv[1], sys.argv[2]
     payload_path = sys.argv[3] if len(sys.argv) == 4 else None
 
@@ -55,12 +71,16 @@ def main():
     rd_start = ra
     if payload_path:
         payload = open(payload_path, 'rb').read()
-        if payload[:8] != b'SWEETXNU':
-            raise SystemExit('payload does not start with SWEETXNU')
+        magic = payload[:8]
+        if magic not in (b'SWEETXNU', b'KAG2TWRP'):
+            raise SystemExit('unknown payload magic %r' % magic)
         rd_end = rd_start + len(payload)
         dtbs = patch_dtb(dtbs, rd_start, rd_end)
-        rd = gzip.compress(payload, 9, mtime=0)
-        print('payload', len(payload), 'initrd', hex(rd_start), '..', hex(rd_end))
+        if magic == b'SWEETXNU':
+            rd = gzip.compress(payload, 9, mtime=0)
+        else:
+            rd = gzip_stored(payload)
+        print('payload', magic.decode(), len(payload), 'initrd', hex(rd_start), '..', hex(rd_end))
     else:
         cpio = b'070701' + b''.join(
             b'%08X' % v for v in (0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 11, 0)

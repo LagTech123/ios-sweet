@@ -12,6 +12,8 @@
 #include "loader.h"
 #include "plog.h"
 #include "fdt.h"
+#include "cc.h"
+#include "dsi.h"
 #ifndef KAGURA
 #include "ufs.h"
 #endif
@@ -50,6 +52,7 @@
 #define PSCI_CPU_ON		0xc4000003UL
 #define PSCI_MIGRATE_INFO_TYPE	0x84000006UL
 #define PSCI_SYSTEM_RESET	0x84000009UL
+#define PSCI_SYSTEM_OFF		0x84000008UL
 #define PSCI_FEATURES		0x8400000aUL
 #define PSCI_SYSTEM_SUSPEND	0xc400000eUL
 #define PSCI_SYSTEM_RESET2	0xc4000012UL
@@ -127,6 +130,22 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	__asm__ volatile("dsb sy" ::: "memory");
 	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
 	wr32(PSHOLD, 0);
+	for (;;)
+		__asm__ volatile("wfe");
+}
+
+/* Stop here instead of resetting.  A reset re-enters FOTAKernel (TWRP's
+ * recovery flag is still set) and looks like a bootloop, while PSCI
+ * SYSTEM_OFF would cut DRAM power and lose the pstore log.  So park the CPU
+ * with the watchdog disabled and let the user force the phone off. */
+static void __attribute__((noreturn)) halt_run(void)
+{
+	plog_str("HALT (power off the phone to continue)\n");
+	plog_commit();
+	con_skip();
+	con_str("HALT", "power off to continue");
+	wr32(MSM_WDT + WDT_EN, 0);
+	__asm__ volatile("dsb sy" ::: "memory");
 	for (;;)
 		__asm__ volatile("wfe");
 }
@@ -445,6 +464,10 @@ void shim_main(uint64_t dtb)
 	}
 	plog_commit();
 #ifdef KAGURA
+	cc_probe();
+	plog_commit();
+	plog_hex("psci sys_off feat", smc(PSCI_FEATURES, PSCI_SYSTEM_OFF, 0, 0));
+	plog_commit();
 	fbsnap_decode();
 #endif
 	stage = "loader";
@@ -461,7 +484,8 @@ void shim_main(uint64_t dtb)
 	con_str("SHIM", "sweet milestone 4: xnu loader");
 #endif
 	con_skip();
-	arm_xnu_watchdog();
+	if (!loader_chain_payload_present(dtb))
+		arm_xnu_watchdog();
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	plog_str("loader=");
@@ -480,7 +504,14 @@ void shim_main(uint64_t dtb)
 	con_str("SHIM", "kagura diagnostics done");
 	plog_str("diag done\n");
 	plog_commit();
-	reset(20);
+	stage = "dsi";
+	plog_str("dsi bringup\n");
+	plog_commit();
+	dsi_bringup();
+	plog_str("dsi returned\n");
+	plog_commit();
+	delay_ms(1000);
+	halt_run();
 #else
 	/* No payload: probe the internal UFS while the MMU is still off. */
 	stage = "ufs";
