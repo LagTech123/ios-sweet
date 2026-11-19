@@ -1,11 +1,11 @@
 diff --git a/bsd/conf/files b/bsd/conf/files
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -106,2 +106,4 @@
+@@ -106,3 +106,4 @@
  bsd/dev/memdev.c			standard
-+bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_ufs.c			standard
 +bsd/dev/kagura_emmc.c			standard
- bsd/dev/mem.c				standard
+ bsd/dev/sweet_sample.c			standard
 diff --git a/bsd/dev/kagura_emmc.c b/bsd/dev/kagura_emmc.c
 new file mode 100644
 --- /dev/null
