@@ -14,6 +14,9 @@
 #include "fdt.h"
 #include "cc.h"
 #include "dsi.h"
+#ifdef KAGURA
+#include "emmc.h"
+#endif
 #ifndef KAGURA
 #include "ufs.h"
 #endif
@@ -504,6 +507,8 @@ void shim_main(uint64_t dtb)
 	con_str("SHIM", "kagura diagnostics done");
 	plog_str("diag done\n");
 	plog_commit();
+	stage = "emmc";
+	emmc_probe();
 	stage = "dsi";
 	plog_str("dsi bringup\n");
 	plog_commit();

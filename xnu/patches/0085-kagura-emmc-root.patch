@@ -1,0 +1,666 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -106,2 +106,4 @@
+ bsd/dev/memdev.c			standard
++bsd/dev/sweet_ufs.c			standard
++bsd/dev/kagura_emmc.c			standard
+ bsd/dev/mem.c				standard
+diff --git a/bsd/dev/kagura_emmc.c b/bsd/dev/kagura_emmc.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/kagura_emmc.c
+@@ -0,0 +1,618 @@
++/*
++ * Kagura (MSM8996) internal eMMC root device.
++ *
++ * Sony ABL loaded our boot image from the eMMC user area, so SDCC1 is already
++ * clocked, tuned and has the card selected. This driver deliberately preserves
++ * that state: polled PIO (CMD17/CMD24), no controller reset, no clock, pad or
++ * timing changes, no descriptors. One GPT partition (boot-arg emmcroot=,
++ * default "userdata") is exposed as the read-only BSD disk kaguraemmc0.
++ * Writes require emmcroot=userdata and emmcrw=1, and are bounds-checked
++ * against that GPT range on every sector.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/buf.h>
++#include <sys/conf.h>
++#include <sys/disk.h>
++#include <sys/errno.h>
++#include <sys/proc.h>
++#include <sys/uio.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/locks.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <libkern/libkern.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++/* Standard SD Host Controller register map (SDCC1 HC window). */
++#define SDHCI_BLOCK_SIZE        0x04u
++#define SDHCI_BLOCK_COUNT       0x06u
++#define SDHCI_ARGUMENT          0x08u
++#define SDHCI_TRANSFER_MODE     0x0Cu
++#define SDHCI_COMMAND           0x0Eu
++#define SDHCI_RESPONSE          0x10u
++#define SDHCI_BUFFER            0x20u
++#define SDHCI_PRESENT_STATE     0x24u
++#define SDHCI_HOST_CONTROL      0x28u
++#define SDHCI_POWER_CONTROL     0x29u
++#define SDHCI_CLOCK_CONTROL     0x2Cu
++#define SDHCI_TIMEOUT_CONTROL   0x2Eu
++#define SDHCI_SOFTWARE_RESET    0x2Fu
++#define SDHCI_INT_STATUS        0x30u
++#define SDHCI_INT_ENABLE        0x34u
++#define SDHCI_SIGNAL_ENABLE     0x38u
++#define SDHCI_HOST_CONTROL2     0x3Eu
++#define SDHCI_CAPABILITIES      0x40u
++#define SDHCI_CAPABILITIES_1    0x44u
++#define SDHCI_ADMA_ERROR        0x54u
++#define SDHCI_HOST_VERSION      0xFEu
++
++#define PRES_CMD_INHIBIT        0x00000001u
++#define PRES_DATA_INHIBIT       0x00000002u
++#define PRES_CARD_PRESENT       0x00010000u
++
++#define TRNS_DMA                0x01u
++#define TRNS_BLK_CNT_EN         0x02u
++#define TRNS_AUTO_CMD12         0x04u
++#define TRNS_READ               0x10u
++#define TRNS_MULTI              0x20u
++
++#define CMD_RESP_SHORT          0x02u
++#define CMD_CRC                 0x08u
++#define CMD_INDEX               0x10u
++#define CMD_DATA                0x20u
++
++#define INT_RESPONSE            0x00000001u
++#define INT_DATA_END            0x00000002u
++#define INT_SPACE_AVAIL         0x00000010u
++#define INT_DATA_AVAIL          0x00000020u
++#define INT_ERROR_MASK          0xffff8000u
++
++#define KEMMC_HC_BASE           0x07464900u   /* DT sdhci@7464900, SDCC1 (eMMC) */
++#define KEMMC_SECTOR            512u
++#define KEMMC_TIMEOUT           40000000u
++
++static vm_offset_t kemmc_regs;
++static uint64_t kemmc_first_lba, kemmc_nsectors;
++static char kemmc_partition_name[16] = "userdata";
++static uint32_t kemmc_secsize = KEMMC_SECTOR;
++static uint8_t kemmc_bounce[KEMMC_SECTOR];
++static dev_t kemmc_bdev;
++static bool kemmc_ready;
++static bool kemmc_writable;
++static LCK_GRP_DECLARE(kemmc_grp, "kagura_emmc");
++static LCK_MTX_DECLARE(kemmc_lock, &kemmc_grp);
++
++static inline uint8_t
++emmc_rd8(uint32_t off)
++{
++	return *(volatile uint8_t *)(kemmc_regs + off);
++}
++
++static inline uint16_t
++emmc_rd16(uint32_t off)
++{
++	return *(volatile uint16_t *)(kemmc_regs + off);
++}
++
++static inline uint32_t
++emmc_rd32(uint32_t off)
++{
++	return *(volatile uint32_t *)(kemmc_regs + off);
++}
++
++static inline void
++emmc_wr8(uint32_t off, uint8_t v)
++{
++	*(volatile uint8_t *)(kemmc_regs + off) = v;
++}
++
++static inline void
++emmc_wr16(uint32_t off, uint16_t v)
++{
++	*(volatile uint16_t *)(kemmc_regs + off) = v;
++}
++
++static inline void
++emmc_wr32(uint32_t off, uint32_t v)
++{
++	*(volatile uint32_t *)(kemmc_regs + off) = v;
++}
++
++static int
++emmc_wait_idle(void)
++{
++	for (unsigned i = 0; i < KEMMC_TIMEOUT; i++) {
++		uint32_t pres = emmc_rd32(SDHCI_PRESENT_STATE);
++		if (!(pres & (PRES_CMD_INHIBIT | PRES_DATA_INHIBIT))) {
++			return 0;
++		}
++	}
++	return EBUSY;
++}
++
++/*
++ * One polled PIO CMD17. The host's clock, bus width, timing and the selected
++ * card are left exactly as ABL set them up; only the per-transfer registers
++ * and interrupt enables are touched. Returns 0 or an errno.
++ */
++static int
++emmc_read_sector(uint32_t lba, uint8_t *sector)
++{
++	uint32_t enable = emmc_rd32(SDHCI_INT_ENABLE);
++	uint32_t signal = emmc_rd32(SDHCI_SIGNAL_ENABLE);
++	uint32_t status = 0;
++	unsigned words = 0;
++	int error = emmc_wait_idle();
++	if (error) {
++		return error;
++	}
++
++	emmc_wr32(SDHCI_INT_ENABLE, 0);
++	emmc_wr32(SDHCI_SIGNAL_ENABLE, 0);
++	status = emmc_rd32(SDHCI_INT_STATUS);
++	emmc_wr32(SDHCI_INT_STATUS, status);
++
++	/* DMA off: SDHCI_TRNS_DMA is what makes this a PIO transfer. */
++	emmc_wr16(SDHCI_BLOCK_SIZE, (uint16_t)KEMMC_SECTOR);
++	emmc_wr16(SDHCI_BLOCK_COUNT, 1);
++	emmc_wr32(SDHCI_ARGUMENT, lba);
++	emmc_wr8(SDHCI_TRANSFER_MODE, (uint8_t)(TRNS_READ | TRNS_BLK_CNT_EN));
++	emmc_wr16(SDHCI_COMMAND, (uint16_t)((17u << 8) | CMD_RESP_SHORT |
++	    CMD_CRC | CMD_INDEX | CMD_DATA));
++
++	for (unsigned i = 0; i < KEMMC_TIMEOUT; i++) {
++		status = emmc_rd32(SDHCI_INT_STATUS);
++		if (status & INT_ERROR_MASK) {
++			printf("KAGURA eMMC: CMD17 error lba=%u int=%x state=%x adma=%x\n",
++			    lba, status, emmc_rd32(SDHCI_PRESENT_STATE),
++			    emmc_rd32(SDHCI_ADMA_ERROR));
++			error = EIO;
++			break;
++		}
++		if ((status & INT_DATA_AVAIL) && words == 0) {
++			for (unsigned j = 0; j < KEMMC_SECTOR / 4; j++) {
++				((uint32_t *)sector)[j] = emmc_rd32(SDHCI_BUFFER);
++			}
++			words = KEMMC_SECTOR / 4;
++			emmc_wr32(SDHCI_INT_STATUS, INT_DATA_AVAIL);
++		}
++		if (words == KEMMC_SECTOR / 4 && (status & INT_DATA_END)) {
++			break;
++		}
++		if (i == KEMMC_TIMEOUT - 1) {
++			printf("KAGURA eMMC: CMD17 timeout lba=%u int=%x state=%x words=%u\n",
++			    lba, status, emmc_rd32(SDHCI_PRESENT_STATE), words);
++			error = ETIMEDOUT;
++		}
++	}
++
++	emmc_wr32(SDHCI_INT_STATUS, emmc_rd32(SDHCI_INT_STATUS));
++	emmc_wr32(SDHCI_INT_ENABLE, enable);
++	emmc_wr32(SDHCI_SIGNAL_ENABLE, signal);
++	return error;
++}
++
++/*
++ * One polled PIO CMD24. Only reachable for emmcroot=userdata with emmcrw=1.
++ * Bounds are re-checked by the strategy routine; this is the last gate.
++ */
++static int
++emmc_write_sector(uint32_t lba, const uint8_t *sector)
++{
++	uint32_t enable = emmc_rd32(SDHCI_INT_ENABLE);
++	uint32_t signal = emmc_rd32(SDHCI_SIGNAL_ENABLE);
++	uint32_t status = 0;
++	unsigned words = 0;
++	int error;
++
++	if (!kemmc_writable || strcmp(kemmc_partition_name, "userdata")) {
++		return EROFS;
++	}
++	if (lba < kemmc_first_lba ||
++	    (uint64_t)lba - kemmc_first_lba >= kemmc_nsectors) {
++		return EPERM;
++	}
++	error = emmc_wait_idle();
++	if (error) {
++		return error;
++	}
++
++	emmc_wr32(SDHCI_INT_ENABLE, 0);
++	emmc_wr32(SDHCI_SIGNAL_ENABLE, 0);
++	status = emmc_rd32(SDHCI_INT_STATUS);
++	emmc_wr32(SDHCI_INT_STATUS, status);
++
++	emmc_wr16(SDHCI_BLOCK_SIZE, (uint16_t)KEMMC_SECTOR);
++	emmc_wr16(SDHCI_BLOCK_COUNT, 1);
++	emmc_wr32(SDHCI_ARGUMENT, lba);
++	emmc_wr8(SDHCI_TRANSFER_MODE, (uint8_t)TRNS_BLK_CNT_EN);  /* write */
++	emmc_wr16(SDHCI_COMMAND, (uint16_t)((24u << 8) | CMD_RESP_SHORT |
++	    CMD_CRC | CMD_INDEX | CMD_DATA));
++
++	for (unsigned i = 0; i < KEMMC_TIMEOUT; i++) {
++		status = emmc_rd32(SDHCI_INT_STATUS);
++		if (status & INT_ERROR_MASK) {
++			printf("KAGURA eMMC: CMD24 error lba=%u int=%x state=%x\n",
++			    lba, status, emmc_rd32(SDHCI_PRESENT_STATE));
++			error = EIO;
++			break;
++		}
++		if ((status & INT_SPACE_AVAIL) && words == 0) {
++			for (unsigned j = 0; j < KEMMC_SECTOR / 4; j++) {
++				emmc_wr32(SDHCI_BUFFER, ((const uint32_t *)sector)[j]);
++			}
++			words = KEMMC_SECTOR / 4;
++			emmc_wr32(SDHCI_INT_STATUS, INT_SPACE_AVAIL);
++		}
++		if (words == KEMMC_SECTOR / 4 && (status & INT_DATA_END)) {
++			break;
++		}
++		if (i == KEMMC_TIMEOUT - 1) {
++			printf("KAGURA eMMC: CMD24 timeout lba=%u int=%x words=%u\n",
++			    lba, status, words);
++			error = ETIMEDOUT;
++		}
++	}
++	/* The card stays busy after a program; CMD_INHIBIT clears when done. */
++	for (unsigned i = 0; !error && i < KEMMC_TIMEOUT; i++) {
++		if (!(emmc_rd32(SDHCI_PRESENT_STATE) & PRES_CMD_INHIBIT)) {
++			break;
++		}
++		if (i == KEMMC_TIMEOUT - 1) {
++			error = ETIMEDOUT;
++		}
++	}
++
++	emmc_wr32(SDHCI_INT_STATUS, emmc_rd32(SDHCI_INT_STATUS));
++	emmc_wr32(SDHCI_INT_ENABLE, enable);
++	emmc_wr32(SDHCI_SIGNAL_ENABLE, signal);
++	return error;
++}
++
++static uint32_t
++emmc_le32(const uint8_t *p)
++{
++	return (uint32_t)p[0] | (uint32_t)p[1] << 8 |
++	    (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
++}
++
++static uint64_t
++emmc_le64(const uint8_t *p)
++{
++	return emmc_le32(p) | (uint64_t)emmc_le32(p + 4) << 32;
++}
++
++static uint32_t
++emmc_crc32(uint32_t crc, const uint8_t *data, size_t len)
++{
++	for (size_t i = 0; i < len; i++) {
++		crc ^= data[i];
++		for (unsigned bit = 0; bit < 8; bit++) {
++			crc = (crc >> 1) ^ (0xedb88320u & -(crc & 1u));
++		}
++	}
++	return crc;
++}
++
++static int
++emmc_find_root_partition(void)
++{
++	uint8_t hdr[KEMMC_SECTOR], entry[KEMMC_SECTOR];
++
++	(void)PE_parse_boot_argn("emmcroot", kemmc_partition_name,
++	    sizeof(kemmc_partition_name));
++	kemmc_partition_name[sizeof(kemmc_partition_name) - 1] = '\0';
++	if (strcmp(kemmc_partition_name, "userdata") &&
++	    strcmp(kemmc_partition_name, "system")) {
++		printf("KAGURA eMMC: emmcroot must be userdata or system\n");
++		return EINVAL;
++	}
++	kemmc_first_lba = 0;
++	kemmc_nsectors = 0;
++
++	int error = emmc_read_sector(1, hdr);
++	if (error) {
++		return error;
++	}
++	uint32_t header_size = emmc_le32(hdr + 12);
++	if (memcmp(hdr, "EFI PART", 8) ||
++	    (header_size != 92 && header_size != 512) ||
++	    emmc_le64(hdr + 24) != 1) {
++		printf("KAGURA eMMC: invalid GPT header\n");
++		return ENXIO;
++	}
++	uint32_t expected_header_crc = emmc_le32(hdr + 16);
++	memset(hdr + 16, 0, 4);
++	if ((emmc_crc32(~0u, hdr, header_size) ^ ~0u) != expected_header_crc) {
++		printf("KAGURA eMMC: GPT header CRC mismatch\n");
++		return EIO;
++	}
++	uint64_t first_usable = emmc_le64(hdr + 40);
++	uint64_t last_usable = emmc_le64(hdr + 48);
++	uint64_t entry_lba = emmc_le64(hdr + 72);
++	uint32_t nentries = emmc_le32(hdr + 80);
++	uint32_t entry_size = emmc_le32(hdr + 84);
++	if (entry_lba < 2 || entry_lba > 1024 || nentries == 0 ||
++	    nentries > 128 || (nentries & 3u) || entry_size != 128 ||
++	    first_usable > last_usable || last_usable > UINT32_MAX) {
++		printf("KAGURA eMMC: unsupported GPT layout\n");
++		return ENXIO;
++	}
++
++	uint32_t crc = ~0u;
++	for (uint32_t s = 0; s < nentries / 4; s++) {
++		error = emmc_read_sector((uint32_t)entry_lba + s, entry);
++		if (error) {
++			return error;
++		}
++		crc = emmc_crc32(crc, entry, KEMMC_SECTOR);
++		for (uint32_t j = 0; j < 4; j++) {
++			const uint8_t *p = entry + j * 128;
++			bool match = true;
++			for (unsigned k = 0; k <= strlen(kemmc_partition_name); k++) {
++				if (p[56 + k * 2] != (uint8_t)kemmc_partition_name[k] ||
++				    p[57 + k * 2] != 0) {
++					match = false;
++					break;
++				}
++			}
++			if (match) {
++				uint64_t first = emmc_le64(p + 32);
++				uint64_t last = emmc_le64(p + 40);
++				if (first < first_usable || last > last_usable || first > last) {
++					return EINVAL;
++				}
++				kemmc_first_lba = first;
++				kemmc_nsectors = last - first + 1;
++			}
++		}
++	}
++	if ((crc ^ ~0u) != emmc_le32(hdr + 88)) {
++		printf("KAGURA eMMC: GPT entries CRC mismatch\n");
++		return EIO;
++	}
++	if (!kemmc_nsectors) {
++		printf("KAGURA eMMC: %s partition not found\n", kemmc_partition_name);
++		return ENXIO;
++	}
++
++	int enable_write = 0;
++	(void)PE_parse_boot_argn("emmcrw", &enable_write, sizeof(enable_write));
++	kemmc_writable = !strcmp(kemmc_partition_name, "userdata") && enable_write == 1;
++	printf("KAGURA eMMC: GPT %s first=%llu sectors=%llu %s\n",
++	    kemmc_partition_name, kemmc_first_lba, kemmc_nsectors,
++	    kemmc_writable ? "writable" : "read-only");
++	return 0;
++}
++
++static int
++emmc_map_host(void)
++{
++	DTEntry node;
++	uintptr_t const *reg = NULL;
++	unsigned int size = 0;
++
++	if (kemmc_regs) {
++		return 0;
++	}
++	if (SecureDTLookupEntry(NULL, "/kagura-emmc", &node) != kSuccess ||
++	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
++	    size < 2 * sizeof(uintptr_t) || reg[0] != KEMMC_HC_BASE ||
++	    reg[1] < 0x100u) {
++		printf("KAGURA eMMC: missing or unexpected ADT register window\n");
++		return ENXIO;
++	}
++	kemmc_regs = ml_io_map(reg[0], reg[1]);
++	if (!kemmc_regs) {
++		return ENOMEM;
++	}
++	printf("KAGURA eMMC: host ver=%x caps=%x state=%x ctrl=%x clk=%x\n",
++	    emmc_rd16(SDHCI_HOST_VERSION), emmc_rd32(SDHCI_CAPABILITIES),
++	    emmc_rd32(SDHCI_PRESENT_STATE), emmc_rd8(SDHCI_HOST_CONTROL),
++	    emmc_rd16(SDHCI_CLOCK_CONTROL));
++	return 0;
++}
++
++/* Diagnostic entry point for the emmcprobe=1 boot-arg. */
++void
++kagura_emmc_probe(void)
++{
++	if (!emmc_map_host()) {
++		(void)emmc_find_root_partition();
++	}
++}
++
++static int
++emmc_open(__unused dev_t dev, int flags, __unused int devtype, __unused struct proc *p)
++{
++	return !kemmc_ready ? ENXIO : ((flags & FWRITE) && !kemmc_writable ? EROFS : 0);
++}
++
++static int
++emmc_close(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
++{
++	return 0;
++}
++
++static void
++emmc_strategy(buf_t bp)
++{
++	int error = 0;
++	caddr_t vaddr = NULL;
++	uint32_t count = buf_count(bp);
++	uint64_t bytes = kemmc_nsectors * KEMMC_SECTOR;
++	uint64_t off = 0;
++	bool rd = (buf_flags(bp) & B_READ) != 0;
++
++	buf_setresid(bp, count);
++	if (!kemmc_ready) {
++		error = ENXIO;
++	} else if (!rd && !kemmc_writable) {
++		error = EROFS;
++	} else if (buf_blkno(bp) < 0) {
++		error = EINVAL;
++	} else {
++		off = (uint64_t)buf_blkno(bp) * kemmc_secsize;
++		if (off > bytes || count > bytes - off) {
++			error = EINVAL;
++		}
++	}
++	if (error || count == 0) {
++		goto done;
++	}
++	if (buf_map(bp, &vaddr)) {
++		error = EIO;
++		goto done;
++	}
++
++	lck_mtx_lock(&kemmc_lock);
++	for (uint32_t n = 0; n < count;) {
++		uint64_t pos = off + n;
++		uint32_t skip = (uint32_t)(pos & (KEMMC_SECTOR - 1));
++		uint32_t take = MIN(count - n, KEMMC_SECTOR - skip);
++		uint64_t lba = kemmc_first_lba + pos / KEMMC_SECTOR;
++		if (lba > UINT32_MAX) {
++			error = EINVAL;
++			break;
++		}
++		if (rd) {
++			error = emmc_read_sector((uint32_t)lba, kemmc_bounce);
++			if (!error) {
++				memcpy(vaddr + n, kemmc_bounce + skip, take);
++			}
++		} else {
++			memcpy(kemmc_bounce, vaddr + n, KEMMC_SECTOR);
++			error = emmc_write_sector((uint32_t)lba, kemmc_bounce);
++		}
++		if (error) {
++			break;
++		}
++		n += take;
++		buf_setresid(bp, count - n);
++	}
++	lck_mtx_unlock(&kemmc_lock);
++	buf_unmap(bp);
++
++done:
++	if (error) {
++		buf_seterror(bp, error);
++	}
++	buf_biodone(bp);
++}
++
++static int
++emmc_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag,
++    __unused struct proc *p)
++{
++	switch (cmd) {
++	case DKIOCGETBLOCKSIZE:
++		*(uint32_t *)data = kemmc_secsize;
++		return 0;
++	case DKIOCSETBLOCKSIZE: {
++		uint32_t requested = *(uint32_t *)data;
++		if (requested < KEMMC_SECTOR || requested > 4096 ||
++		    (requested & (requested - 1))) {
++			return EINVAL;
++		}
++		kemmc_secsize = requested;
++		return 0;
++	}
++	case DKIOCGETPHYSICALBLOCKSIZE:
++		*(uint32_t *)data = KEMMC_SECTOR;
++		return 0;
++	case DKIOCGETBLOCKCOUNT:
++		*(uint64_t *)data = kemmc_nsectors * KEMMC_SECTOR / kemmc_secsize;
++		return 0;
++	case DKIOCISWRITABLE:
++		*(uint32_t *)data = kemmc_writable ? 1 : 0;
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTREAD:
++		*(uint64_t *)data = 1;
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTWRITE:
++		*(uint64_t *)data = kemmc_writable ? 1 : 0;
++		return 0;
++	case DKIOCGETMAXSEGMENTCOUNTREAD:
++	case DKIOCGETMAXSEGMENTCOUNTWRITE:
++		*(uint64_t *)data = 1;
++		return 0;
++	case DKIOCSYNCHRONIZE:
++	case DKIOCSYNCHRONIZECACHE:
++		return 0;
++	default:
++		return ENOTTY;
++	}
++}
++
++static int
++emmc_psize(__unused dev_t dev)
++{
++	return kemmc_ready ?
++	    (int)MIN(kemmc_nsectors * KEMMC_SECTOR / kemmc_secsize, INT_MAX) : -1;
++}
++
++static int
++emmc_read(dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	return physio(emmc_strategy, NULL, dev, B_READ, minphys, uio, (int)kemmc_secsize);
++}
++
++static int
++emmc_write(__unused dev_t dev, __unused struct uio *uio, __unused int ioflag)
++{
++	return EROFS;
++}
++
++static const struct bdevsw emmc_bdevsw = {
++	.d_open = emmc_open, .d_close = emmc_close, .d_strategy = emmc_strategy,
++	.d_ioctl = emmc_ioctl, .d_dump = eno_dump, .d_psize = emmc_psize,
++	.d_type = D_DISK,
++};
++
++static const struct cdevsw emmc_cdevsw = {
++	.d_open = emmc_open, .d_close = emmc_close, .d_read = emmc_read,
++	.d_write = emmc_write, .d_ioctl = emmc_ioctl, .d_stop = eno_stop,
++	.d_reset = eno_reset, .d_ttys = NULL, .d_select = eno_select,
++	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_reserved_1 = eno_getc,
++	.d_reserved_2 = eno_putc, .d_type = D_DISK,
++};
++
++/* Root device for rd=kaguraemmc0 (IOFindBSDRoot). */
++int kagura_emmc_rootdev(dev_t *dev);
++
++int
++kagura_emmc_rootdev(dev_t *dev)
++{
++	if (!kemmc_ready) {
++		int error = emmc_map_host();
++		if (error) {
++			return error;
++		}
++		error = emmc_find_root_partition();
++		if (error) {
++			return error;
++		}
++		int bmajor = bdevsw_add(-1, &emmc_bdevsw);
++		if (bmajor < 0) {
++			return ENXIO;
++		}
++		int cmajor = cdevsw_add_with_bdev(-1, &emmc_cdevsw, bmajor);
++		if (cmajor < 0) {
++			return ENXIO;
++		}
++		kemmc_bdev = makedev(bmajor, 0);
++		devfs_make_node(kemmc_bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640,
++		    "kaguraemmc0");
++		devfs_make_node(makedev(cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR,
++		    0640, "rkaguraemmc0");
++		kemmc_ready = true;
++		printf("KAGURA eMMC: /dev/kaguraemmc0 ready, GPT %s\n",
++		    kemmc_partition_name);
++	}
++	*dev = kemmc_bdev;
++	return 0;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -766,8 +766,31 @@
+ 		}
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	{
++		uint32_t emmcprobe = 0;
++		(void)PE_parse_boot_argn("emmcprobe", &emmcprobe, sizeof(emmcprobe));
++		if (emmcprobe == 1) {
++			extern void kagura_emmc_probe(void);
++			kagura_emmc_probe();
++		}
++	}
++	if (strcmp(rdBootVar, "kaguraemmc0") == 0) {
++		extern int kagura_emmc_rootdev(dev_t *dev);
++		OSSafeReleaseNULL(matching);
++		int emmc_error = kagura_emmc_rootdev(root);
++		if (emmc_error) {
++			panic("IOFindBSDRoot: KAGURA eMMC root unavailable: %d", emmc_error);
++		}
++		strlcpy(rootName, rdBootVar, rootNameSize);
++		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
++		*oflags = 0;
++		goto iofrootx;
++	}
++#endif
++
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ //
+ //	SWEET: root on a GPT partition of the internal UFS (bsd/dev/sweet_ufs.c)
+ //
+ 	if (strcmp(rdBootVar, "ufsroot0") == 0) {

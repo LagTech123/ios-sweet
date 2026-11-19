@@ -196,6 +196,14 @@ def build(seed=None, qemu=False, highmem=False):
         ('stride', u32(FB_STRIDE)),
     ])
 
+    # Internal eMMC (SDCC1) - consumed by bsd/dev/kagura_emmc.c. Sony ABL
+    # leaves this controller initialized; the driver only does polled PIO.
+    kagura_emmc = node('kagura-emmc', [
+        ph(),
+        ('compatible', cstr('qcom,sdhci-msm')),
+        ('reg', u64(0x07464900, 0x500)),
+    ])
+
     # pmap_compute_max_asids requires the node even when no overrides are set.
     # An absent pmap-max-asids property selects XNU's own MAX_ASIDS default.
     # No effaceable storage: keybagd then reads /private/var/keybags/systembag.kb
@@ -231,7 +239,7 @@ def build(seed=None, qemu=False, highmem=False):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product)
+    ], [chosen, defaults, cpus, arm_io, fbcon, kagura_emmc, buttons, pram] + product)
 
 
 if __name__ == '__main__':
