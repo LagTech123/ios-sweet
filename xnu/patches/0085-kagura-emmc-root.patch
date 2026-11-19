@@ -10,7 +10,7 @@ diff --git a/bsd/dev/kagura_emmc.c b/bsd/dev/kagura_emmc.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kagura_emmc.c
-@@ -0,0 +1,618 @@
+@@ -0,0 +1,619 @@
 +/*
 + * Kagura (MSM8996) internal eMMC root device.
 + *
@@ -497,7 +497,8 @@ new file mode 100644
 +				memcpy(vaddr + n, kemmc_bounce + skip, take);
 +			}
 +		} else {
-+			memcpy(kemmc_bounce, vaddr + n, KEMMC_SECTOR);
++			memset(kemmc_bounce, 0, KEMMC_SECTOR);
++			memcpy(kemmc_bounce + skip, vaddr + n, take);
 +			error = emmc_write_sector((uint32_t)lba, kemmc_bounce);
 +		}
 +		if (error) {
