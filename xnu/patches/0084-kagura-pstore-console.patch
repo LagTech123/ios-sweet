@@ -2,7 +2,7 @@
 +++ b/osfmk/arm64/sweet_early.c
 @@ -13,6 +13,37 @@
  
- static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;
+ static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x83401000;
  #define EARLY_FB early_fb
 +
 +/* Mirror the early console into the MSM8996 ramoops zone so a bare-metal
@@ -36,8 +36,8 @@
 +	early_pstore_len = 0;
 +}
  #define EARLY_WIDTH 1080u
- #define EARLY_HEIGHT 2400u
- #define EARLY_STRIDE (4320u / 4)
+ #define EARLY_HEIGHT 1920u
+ #define EARLY_STRIDE (4352u / 4)
 @@ -45,6 +76,7 @@
  	if (early_disabled) {
  		return;
