@@ -163,7 +163,7 @@ new file mode 100644
 +		return error;
 +	}
 +
-+	emmc_wr32(SDHCI_INT_ENABLE, 0);
++	emmc_wr32(SDHCI_INT_ENABLE, 0x01ff00ffu); /* status enable */
 +	emmc_wr32(SDHCI_SIGNAL_ENABLE, 0);
 +	status = emmc_rd32(SDHCI_INT_STATUS);
 +	emmc_wr32(SDHCI_INT_STATUS, status);
@@ -233,7 +233,7 @@ new file mode 100644
 +		return error;
 +	}
 +
-+	emmc_wr32(SDHCI_INT_ENABLE, 0);
++	emmc_wr32(SDHCI_INT_ENABLE, 0x01ff00ffu); /* status enable */
 +	emmc_wr32(SDHCI_SIGNAL_ENABLE, 0);
 +	status = emmc_rd32(SDHCI_INT_STATUS);
 +	emmc_wr32(SDHCI_INT_STATUS, status);

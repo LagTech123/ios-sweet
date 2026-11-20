@@ -1,6 +1,6 @@
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -513,7 +513,27 @@
+@@ -513,7 +513,36 @@
  	mov		x20, x0
  	mov		x21, #0
  
@@ -14,10 +14,19 @@
 +	mov	w1, #0
 +	str	w1, [x0]
 +	str	w1, [x0, #4]
-+	MOV64	x1, 0x4741545320554e58
-+	str	x1, [x0, #12]
-+	MOV64	x1, 0x00000000000a3045
-+	str	x1, [x0, #20]
++	/* The marker text is written with 4-byte stores: an 8-byte store at
++	 * +12/+20 is 4-byte-aligned but not 8-byte-aligned, which raises an
++	 * alignment fault (FSC 0x21) while the MMU is off (Device-nGnRnE).
++	 * "XNU STAGE0\n" is split across +12/+16/+20, all 4-byte-aligned. */
++	movz	w1, #0x4e58
++	movk	w1, #0x2055, lsl #16
++	str	w1, [x0, #12]
++	movz	w1, #0x5453
++	movk	w1, #0x4741, lsl #16
++	str	w1, [x0, #16]
++	movz	w1, #0x3045
++	movk	w1, #0x000a, lsl #16
++	str	w1, [x0, #20]
 +	mov	w1, #11
 +	str	w1, [x0, #8]
 +	dsb	sy
