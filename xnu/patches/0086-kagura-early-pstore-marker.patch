@@ -1,0 +1,54 @@
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -513,7 +513,27 @@
+ 	mov		x20, x0
+ 	mov		x21, #0
+ 
+ #if defined(SWEET)
++	/* Kagura stage-0 pstore marker. Raw physical write with the MMU off,
++	 * no stack or page tables: proves XNU's first instructions executed even
++	 * if a later stage spins silently in the reset vector. DBGC format
++	 * matches sweet_early_pstore_putc(): text at +12, length at +8, magic
++	 * committed last at +0. */
++	MOV64	x0, 0xa7fbe000
++	mov	w1, #0
++	str	w1, [x0]
++	str	w1, [x0, #4]
++	MOV64	x1, 0x4741545320554e58
++	str	x1, [x0, #12]
++	MOV64	x1, 0x00000000000a3045
++	str	x1, [x0, #20]
++	mov	w1, #11
++	str	w1, [x0, #8]
++	dsb	sy
++	MOV64	x1, 0x43474244
++	str	w1, [x0]
++	dsb	sy
++
+ 	/* Stage 0: white 64x32 band, no stack or page tables needed. */
+ 	MOV64	x0, (0x83400000 + 1888 * 4352)
+ 	mov		w1, #-1
+@@ -693,8 +716,23 @@
+ 	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
+ 	add		x13, x25, #(2 * PGBYTES)
+ 	str		x11, [x13, x12, lsl #TTE_SHIFT]
+ #endif
+ 
++#if defined(SWEET)
++	/* Kagura ramoops console: identity-map one 32MB V=P block so the raw
++	 * physical early_pstore pointer (0xa7fbe000) used by sweet_early_putc()
++	 * is valid from the very first stage mark, before arm_vm_init installs
++	 * the KVA alias. Without this the first pstore write faults at EL1 and
++	 * XNU spins silently in the reset vector. */
++	MOV64	x10, 0xa7f00000
++	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
++	orr		x11, x11, x10
++	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
++	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
++	add		x13, x25, #(2 * PGBYTES)
++	str		x11, [x13, x12, lsl #TTE_SHIFT]
++#endif
++
+ 	/* Ensure TTEs are visible */
+ 	dsb		ish
+ 
