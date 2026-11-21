@@ -1,0 +1,117 @@
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index e1f6e66..a4235c3 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1878,6 +1878,8 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	vm_offset_t      ptpage_vaddr;
+ 	vm_map_address_t dynamic_memory_begin;
+ 
++	sweet_early_mark(27, "arm_vm_init: function entry");
++
+ 	/*
+ 	 * Get the virtual and physical kernel-managed memory base from boot_args.
+ 	 */
+@@ -1911,6 +1913,8 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 		panic("Unsupported memory configuration %lx", mem_size);
+ 	}
+ 
++	sweet_early_mark(28, "arm_vm_init: mem_size checks passed");
++
+ #if defined(ARM_LARGE_MEMORY)
+ 	unsigned long physmap_l1_entries = ((real_phys_size + ARM64_PHYSMAP_SLIDE_RANGE + ARM64_PHYSMAP_ALIGNMENT_PADDING) >> ARM_TT_L1_SHIFT) + 1;
+ 	physmap_base = VM_MIN_KERNEL_ADDRESS - (physmap_l1_entries << ARM_TT_L1_SHIFT);
+@@ -1918,6 +1922,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	physmap_base = phystokv(args->topOfKernelData);
+ #endif
+ 
++	sweet_early_mark(29, "arm_vm_init: before early_random");
+ 	// Slide the physical aperture to a random page-aligned location within the slide range
+ 	uint64_t physmap_slide = early_random() & ARM64_PHYSMAP_SLIDE_MASK & ~((uint64_t)PAGE_MASK);
+ 	assert(physmap_slide < ARM64_PHYSMAP_SLIDE_RANGE);
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index bd0df0d..a9e003f 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -121,12 +121,14 @@ sweet_early_string(const char *s)
+ void
+ sweet_early_mark(unsigned int stage, const char *label)
+ {
+-	if (early_disabled || stage > 20) {
++	if (early_disabled || stage > 63) {
+ 		return;
+ 	}
+ 	uint32_t color = 0xff00ff00u | ((stage & 7u) * 32u << 16);
++	/* Keep the colour swatch inside the visible 1080-px line. */
++	unsigned int swatch = stage % 22;
+ 	for (unsigned int y = EARLY_HEIGHT - 32; y < EARLY_HEIGHT; y++) {
+-		for (unsigned int x = stage * 48; x < (stage + 1) * 48; x++) {
++		for (unsigned int x = swatch * 48; x < (swatch + 1) * 48; x++) {
+ 			EARLY_FB[y * EARLY_STRIDE + x] = color;
+ 		}
+ 	}
+diff --git a/osfmk/prng/prng_random.c b/osfmk/prng/prng_random.c
+index c53d45d..f0d3bd8 100644
+--- a/osfmk/prng/prng_random.c
++++ b/osfmk/prng/prng_random.c
+@@ -41,6 +41,13 @@
+ #include <corecrypto/cckprng.h>
+ #include <corecrypto/ccsha2.h>
+ 
++#if defined(SWEET)
++#include <arm64/sweet_early.h>
++#define SWEET_MARK(n, l) sweet_early_mark((n), (l))
++#else
++#define SWEET_MARK(n, l) do { } while (0)
++#endif
++
+ static struct cckprng_ctx *prng_ctx;
+ 
+ static SECURITY_READ_ONLY_LATE(struct cckprng_funcs) prng_funcs;
+@@ -55,13 +62,20 @@ bootseed_init_bootloader(const struct ccdigest_info * di, ccdigest_ctx_t ctx)
+ 	uint8_t seed[64];
+ 	uint32_t n;
+ 
++	SWEET_MARK(30, "bootseed: calling PE_get_random_seed");
+ 	n = PE_get_random_seed(seed, sizeof(seed));
++	SWEET_MARK(31, "bootseed: PE_get_random_seed returned");
+ 	if (n < sizeof(seed)) {
+ 		/*
+-		 * Insufficient entropy is fatal.  We must fill the
+-		 * entire entropy buffer during initializaton.
++		 * SWEET bring-up: the ADT may supply a short or empty seed, and
++		 * panicking here is invisible (serial_init() has not run yet), so
++		 * the kernel just looks hung. Pad with a fixed, non-secret pattern;
++		 * this bring-up kernel has no security requirement.
+ 		 */
+-		panic("Expected %lu seed bytes from bootloader, but got %u.", sizeof(seed), n);
++		SWEET_MARK(32, "bootseed: SHORT/MISSING seed, padding");
++		for (uint32_t i = n; i < sizeof(seed); i++) {
++			seed[i] = (uint8_t)(0xA5 ^ i);
++		}
+ 	}
+ 
+ 	ccdigest_update(di, ctx, sizeof(seed), seed);
+@@ -327,6 +341,7 @@ early_random(void)
+ 
+ 	if (init == 0) {
+ 		bootseed_init();
++		SWEET_MARK(33, "early_random: bootseed_init done");
+ 
+ 		/* Init DRBG for NIST HMAC */
+ 		ccdrbg_factory_nisthmac(&erandom.drbg_info, &erandom.drbg_custom);
+@@ -342,6 +357,7 @@ early_random(void)
+ 		if (rc != CCDRBG_STATUS_OK) {
+ 			panic("ccdrbg_init() returned %d", rc);
+ 		}
++		SWEET_MARK(34, "early_random: ccdrbg_init done");
+ 
+ 		cc_clear(sizeof(nonce), &nonce);
+ 
+@@ -378,6 +394,7 @@ read_erandom(void * buf, size_t nbytes)
+ 
+ 		// Since "strict FIPS" is disabled, the DRBG will never
+ 		// request a reseed; therefore, we panic on any error
++		SWEET_MARK(35, "read_erandom: before ccdrbg_generate");
+ 		rc = ccdrbg_generate(&erandom.drbg_info, (struct ccdrbg_state *)erandom.drbg_state, n, buffer_bytes, 0, NULL);
+ 		if (rc != CCDRBG_STATUS_OK) {
+ 			panic("read_erandom ccdrbg error %d", rc);
