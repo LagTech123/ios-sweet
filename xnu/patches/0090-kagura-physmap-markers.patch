@@ -1,0 +1,73 @@
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index 19ee84b..3a68b84 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1592,16 +1592,35 @@ arm_vm_physmap_init(boot_args *args)
+ {
+ 	ptov_table_entry temp_ptov_table[PTOV_TABLE_SIZE];
+ 	bzero(temp_ptov_table, sizeof(temp_ptov_table));
++	sweet_early_mark(41, "physmap_init: entry");
+ 
+ 	// Will be handed back to VM layer through ml_static_mfree() in arm_vm_prot_finalize()
+ 	arm_vm_physmap_slide(temp_ptov_table, gVirtBase, segLOWEST - gVirtBase, AP_RWNA,
+ 	    ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
++	sweet_early_mark(42, "physmap_init: after gVirtBase slide");
+ 
+-	arm_vm_page_granular_RWNX(end_kern, phystokv(args->topOfKernelData) - end_kern,
+-	    ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT); /* Device Tree (if not locked down), RAM Disk (if present), bootArgs */
++	/*
++	 * Upstream subtracts two virtual addresses here. On kagura the kernel's
++	 * virtual span (__TEXT at gVirtBase + 16MB .. end_kern) is larger than the
++	 * payload's physical footprint above gPhysBase, so
++	 * phystokv(args->topOfKernelData) can land BELOW end_kern. The unsigned
++	 * subtraction then wraps and arm_vm_page_granular_prot() walks ~2^32 2MB
++	 * blocks: a silent hang with no panic line. Map the range only when it is
++	 * non-empty (markers 43/44/46 show which way it went).
++	 */
++	sweet_early_mark(43, "physmap_init: before boot-data RWNX");
++	vm_offset_t top_kernel_va = phystokv(args->topOfKernelData);
++	if (top_kernel_va > end_kern) {
++		arm_vm_page_granular_RWNX(end_kern, top_kernel_va - end_kern,
++		    ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT); /* Device Tree (if not locked down), RAM Disk (if present), bootArgs */
++		sweet_early_mark(44, "physmap_init: boot-data RWNX mapped");
++	} else {
++		sweet_early_mark(46, "physmap_init: boot-data range empty (topOfKernelData VA below end_kern)");
++	}
+ 
+ 	arm_vm_physmap_slide(temp_ptov_table, (args->topOfKernelData - gPhysBase + gVirtBase),
+ 	    real_avail_end - args->topOfKernelData, AP_RWNA, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT); // rest of physmem
++	sweet_early_mark(45, "physmap_init: after rest-of-physmem slide");
+ 
+ 	assert((temp_ptov_table[ptov_index - 1].va + temp_ptov_table[ptov_index - 1].len) <= physmap_end);
+ 
+@@ -1848,6 +1867,7 @@ sweet_early_map_final(void)
+ 	    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
+ 	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
+ 	    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
++	sweet_early_mark(37, "map_final: framebuffer alias mapped");
+ 
+ 	const vm_map_address_t pstore_va = SWEET_EARLY_PSTORE_VA;
+ 	assert(pstore_va + ARM_TT_L2_SIZE <= gVirtBase);
+@@ -1860,10 +1880,12 @@ sweet_early_map_final(void)
+ 	    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
+ 	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
+ 	    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
++	sweet_early_mark(38, "map_final: pstore alias mapped");
+ 	/* The console zone is 0xbe000 bytes into the 2MB block mapped at
+ 	 * 0xa7f00000 (zone base 0xa7fbe000). */
+ 	sweet_early_set_pstore(pstore_va + 0xbe000);
+ 	__asm__ volatile("dsb ishst" ::: "memory");
++	sweet_early_mark(39, "map_final: pstore pointer switched, done");
+ }
+ #endif
+ 
+@@ -2206,7 +2228,9 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 
+ #if defined(SWEET)
+ 	/* phystokv() must still refer to the bootstrap aperture here. */
++	sweet_early_mark(36, "arm_vm_init: before sweet_early_map_final");
+ 	sweet_early_map_final();
++	sweet_early_mark(40, "arm_vm_init: after sweet_early_map_final");
+ #endif
+ 	arm_vm_physmap_init(args);
+ 	sweet_early_mark(25, "arm_vm_init: after sweet_early_map_final+arm_vm_physmap_init");
