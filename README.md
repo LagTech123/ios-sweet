@@ -1,4 +1,4 @@
-# ios-sweet-kagura
+# ios-sweet-kagura - Made by AI
 
 **Apple's iOS 16 XNU on a Sony Xperia XZ F8331.**
 
@@ -41,10 +41,8 @@ function spins). Patch `0090` instruments that window and guards the underflow.
 - The shim is built with `shim/build_kagura.sh` and packed with `shim/pack_kagura.py` (stock Sony
   608-byte header, `ABS64: 0`). `tools/mkadt.py` generates the device tree XNU receives.
 - Bring-up uses a kernel payload staged in the `userdata` partition (`mmcblk0p54`); the shim finds
-  it, copies the Mach-O segments and jumps. `fastboot boot <image>` (RAM only) is the normal way
-  to try an image.
-- After a boot, read the log from TWRP as `/sys/fs/pstore/console-ramoops` before rebooting into
-  Android.
+  it, copies the Mach-O segments and jumps.
+- After a boot, read the log from TWRP as `/sys/fs/pstore/console-ramoops`
 
 ## Known problems
 
@@ -62,3 +60,7 @@ function spins). Patch `0090` instruments that window and guards the underflow.
 
 `NOTES.md` describes the unrelated Redmi `sweet` reference port; its hardware details do not
 apply to `kagura`.
+
+## Made by
+- Claude (Free tier with MCP Connector)
+- OpenCode (DeepSeek V4.1 Flash, MiMo-V2.6-Flash, Big Pickle)
