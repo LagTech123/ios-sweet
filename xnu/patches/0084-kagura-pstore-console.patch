@@ -66,7 +66,7 @@
  
  static void
  sweet_early_map_final(void)
-@@ -1847,6 +1848,19 @@
+@@ -1847,6 +1848,21 @@
  	    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
  	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
  	    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
@@ -83,8 +83,8 @@
 +	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
 +	    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
 +	/* The console zone is 0xbe000 bytes into the 2MB block mapped at
-	 * 0xa7f00000 (zone base 0xa7fbe000). */
-	sweet_early_set_pstore(pstore_va + 0xbe000);
++	 * 0xa7f00000 (zone base 0xa7fbe000). */
++	sweet_early_set_pstore(pstore_va + 0xbe000);
  	__asm__ volatile("dsb ishst" ::: "memory");
  }
  #endif

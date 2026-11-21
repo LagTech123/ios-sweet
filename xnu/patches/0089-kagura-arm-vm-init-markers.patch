@@ -1,8 +1,8 @@
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
-index e1f6e66..a4235c3 100644
+index ce3e668..19ee84b 100644
 --- a/osfmk/arm64/arm_vm_init.c
 +++ b/osfmk/arm64/arm_vm_init.c
-@@ -1878,6 +1878,8 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1880,6 +1880,8 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	vm_offset_t      ptpage_vaddr;
  	vm_map_address_t dynamic_memory_begin;
  
@@ -11,7 +11,7 @@ index e1f6e66..a4235c3 100644
  	/*
  	 * Get the virtual and physical kernel-managed memory base from boot_args.
  	 */
-@@ -1911,6 +1913,8 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1913,6 +1915,8 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  		panic("Unsupported memory configuration %lx", mem_size);
  	}
  
@@ -20,23 +20,23 @@ index e1f6e66..a4235c3 100644
  #if defined(ARM_LARGE_MEMORY)
  	unsigned long physmap_l1_entries = ((real_phys_size + ARM64_PHYSMAP_SLIDE_RANGE + ARM64_PHYSMAP_ALIGNMENT_PADDING) >> ARM_TT_L1_SHIFT) + 1;
  	physmap_base = VM_MIN_KERNEL_ADDRESS - (physmap_l1_entries << ARM_TT_L1_SHIFT);
-@@ -1918,6 +1922,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1920,6 +1924,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	physmap_base = phystokv(args->topOfKernelData);
  #endif
  
 +	sweet_early_mark(29, "arm_vm_init: before early_random");
  	// Slide the physical aperture to a random page-aligned location within the slide range
  	uint64_t physmap_slide = early_random() & ARM64_PHYSMAP_SLIDE_MASK & ~((uint64_t)PAGE_MASK);
- 	assert(physmap_slide < ARM64_PHYSMAP_SLIDE_RANGE);
+ 	sweet_early_mark(21, "arm_vm_init: after early_random/physmap_slide");
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
-index bd0df0d..a9e003f 100644
+index b22103b..a9e003f 100644
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
 @@ -121,12 +121,14 @@ sweet_early_string(const char *s)
  void
  sweet_early_mark(unsigned int stage, const char *label)
  {
--	if (early_disabled || stage > 20) {
+-	if (early_disabled || stage > 40) {
 +	if (early_disabled || stage > 63) {
  		return;
  	}
