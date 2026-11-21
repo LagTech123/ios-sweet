@@ -1,0 +1,59 @@
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1906,6 +1906,7 @@
+ 
+ 	// Slide the physical aperture to a random page-aligned location within the slide range
+ 	uint64_t physmap_slide = early_random() & ARM64_PHYSMAP_SLIDE_MASK & ~((uint64_t)PAGE_MASK);
++	sweet_early_mark(21, "arm_vm_init: after early_random/physmap_slide");
+ 	assert(physmap_slide < ARM64_PHYSMAP_SLIDE_RANGE);
+ 
+ 	physmap_base += physmap_slide;
+@@ -2134,6 +2135,7 @@
+ 	vm_prelink_edata = segPRELINKDATAB + segSizePRELINKDATA;
+ 
+ 	arm_vm_prot_init(args);
++	sweet_early_mark(22, "arm_vm_init: after arm_vm_prot_init");
+ 
+ 	/*
+ 	 * Initialize the page tables for the low globals:
+@@ -2164,6 +2166,7 @@
+ 	 * With legacy 3 level table systems we never mapped more than a single L1 entry so this may be dead code
+ 	 */
+ 	init_ptpages(cpu_tte, dynamic_memory_begin, VM_MAX_KERNEL_ADDRESS, TRUE, ARM_DYNAMIC_TABLE_XN | ARM_TTE_TABLE_AP(ARM_TTE_TABLE_AP_USER_NA));
++	sweet_early_mark(23, "arm_vm_init: after init_ptpages");
+ #endif
+ 
+ #if KASAN
+@@ -2178,15 +2181,18 @@
+ #endif /* MONOTONIC */
+ 
+ 	arm_set_user_tbi();
++	sweet_early_mark(24, "arm_vm_init: after arm_set_user_tbi");
+ 
+ #if defined(SWEET)
+ 	/* phystokv() must still refer to the bootstrap aperture here. */
+ 	sweet_early_map_final();
+ #endif
+ 	arm_vm_physmap_init(args);
++	sweet_early_mark(25, "arm_vm_init: after sweet_early_map_final+arm_vm_physmap_init");
+ 	set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
+ 
+ 	ml_enable_monitor();
++	sweet_early_mark(26, "arm_vm_init: after ml_enable_monitor");
+ 
+ #if defined(SWEET)
+ 	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
+
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -89,7 +89,7 @@
+ void
+ sweet_early_mark(unsigned int stage, const char *label)
+ {
+-	if (early_disabled || stage > 20) {
++	if (early_disabled || stage > 40) {
+ 		return;
+ 	}
+ 	uint32_t color = 0xff00ff00u | ((stage & 7u) * 32u << 16);
