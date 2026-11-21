@@ -1,0 +1,45 @@
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index 3a68b84..bfa41ac 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1881,11 +1881,18 @@ sweet_early_map_final(void)
+ 	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
+ 	    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
+ 	sweet_early_mark(38, "map_final: pstore alias mapped");
+-	/* The console zone is 0xbe000 bytes into the 2MB block mapped at
+-	 * 0xa7f00000 (zone base 0xa7fbe000). */
+-	sweet_early_set_pstore(pstore_va + 0xbe000);
++	/*
++	 * The console zone is 0xbe000 bytes into the 2MB block mapped at
++	 * 0xa7f00000 (zone base 0xa7fbe000). Do NOT point early_pstore at it yet:
++	 * this TTE only exists in cpu_tte, and TTBR1 still walks the bootstrap
++	 * table until set_mmu_ttb_alternate() runs after arm_vm_physmap_init().
++	 * The first store through the alias before that data-aborts with no
++	 * vectors installed (silent death, marker 39/40 never printed).
++	 * arm_vm_init() switches the pointer once TTBR1 is live and the TLB is
++	 * flushed (markers 47/48).
++	 */
+ 	__asm__ volatile("dsb ishst" ::: "memory");
+-	sweet_early_mark(39, "map_final: pstore pointer switched, done");
++	sweet_early_mark(39, "map_final: aliases in place, pstore switch deferred");
+ }
+ #endif
+ 
+@@ -2246,6 +2253,17 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
+ 
+ 	flush_mmu_tlb();
++#if defined(SWEET)
++	/*
++	 * TTBR1 now walks cpu_tte (set_mmu_ttb_alternate: dsb sy / msr TTBR1_EL1 /
++	 * isb sy) and flush_mmu_tlb() has dropped any stale entries, so the pstore
++	 * alias written by sweet_early_map_final() is reachable at last. This is
++	 * the first store through it; the old VA=PA pointer is dead from here on
++	 * (TTBR0 was just invalidated).
++	 */
++	sweet_early_set_pstore(SWEET_EARLY_PSTORE_VA + 0xbe000);
++	sweet_early_mark(47, "arm_vm_init: pstore switched to alias (TTBR1 live, TLB flushed)");
++#endif
+ 	sweet_early_mark(10, "TTBR0 off; TLB flushed");
+ 	kva_active = TRUE;
+ 	// global table pointers may need to be different due to physical aperture remapping
