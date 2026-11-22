@@ -1,0 +1,45 @@
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -2254,27 +2254,27 @@
+ 
+ 	ml_enable_monitor();
+ 	sweet_early_mark(26, "arm_vm_init: after ml_enable_monitor");
+ 
+ #if defined(SWEET)
+-	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
+-	sweet_early_relocate(SWEET_EARLY_FB_VA);
++	/*
++	 * 0096: keep the early console on its identity VA=PA pointers and keep
++	 * TTBR0 (bootstrap identity map) alive.  With __ARM_16K_PG__ an L2 block
++	 * covers 32 MB, but the 0084 alias PAs (0x83400000 FB, 0xa7f00000
++	 * pstore) are not 32 MB-aligned: the TTEs actually map 0x82000000 and
++	 * 0xa6000000.  All console writes after marker 9 therefore landed in the
++	 * wrong RAM instead of the real framebuffer/ramoops, which is why every
++	 * log stopped at 9 even though the kernel may have continued.  Identity
++	 * pointers work while TTBR0 is intact, so defer the switch until the
++	 * real pmap takes over.  0095's bracket markers are kept for continuity.
++	 */
++	sweet_early_relocate(0x83401000ULL);
++	sweet_early_mark(51, "arm_vm_init: console kept on identity VA=PA");
+ #endif
+ #if defined(SWEET)
+-	/*
+-	 * 0095: repoint the pstore mirror BEFORE TTBR0 is switched (the identity
+-	 * low-VA pointer dies with it), then bracket the switch itself so the log
+-	 * says exactly where the boot stops. Marker 27 is tagged (0095) to prove
+-	 * this log is fresh rather than a leftover from the previous boot.
+-	 */
+-	sweet_early_set_pstore(SWEET_EARLY_PSTORE_VA + 0xbe000);
+-	sweet_early_mark(51, "arm_vm_init: about to switch TTBR0");
+-#endif
+-	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
+-#if defined(SWEET)
+-	sweet_early_mark(52, "arm_vm_init: TTBR0 switch returned");
+-	sweet_early_mark(49, "arm_vm_init: TTBR0 off, pstore alias live");
++	sweet_early_mark(52, "arm_vm_init: TTBR0 switch deferred");
++	sweet_early_mark(49, "arm_vm_init: TTBR0 still bootstrap");
+ #endif
+ 
+ 	flush_mmu_tlb();
+ #if defined(SWEET)
+ 	sweet_early_mark(50, "arm_vm_init: TLB flushed after TTBR0 off");
