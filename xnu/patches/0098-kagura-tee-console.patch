@@ -1,0 +1,171 @@
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -8,8 +8,10 @@
+ 
+ #if defined(SWEET)
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
++void sweet_early_pstore_putc(char c);
++void sweet_early_note_ttbr0_off(void);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_set_pstore(uint64_t base);
+ void sweet_early_disable(void);
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -20,14 +20,14 @@
+ #define EARLY_PSTORE_MAGIC 0x43474244u
+ static volatile uint8_t *early_pstore = (volatile uint8_t *)(uintptr_t)0xa7fbe000UL;
+ static unsigned int early_pstore_len;
+ 
+-static void
++void
+ sweet_early_pstore_putc(char c)
+ {
+ 	volatile uint32_t *header = (volatile uint32_t *)early_pstore;
+ 
+-	if (!early_pstore || early_pstore_len >= EARLY_PSTORE_SIZE - 12) {
++	if (early_ttbr0_off || !early_pstore || early_pstore_len >= EARLY_PSTORE_SIZE - 12) {
+ 		return;
+ 	}
+ 	early_pstore[12 + early_pstore_len++] = (uint8_t)c;
+ 	header[0] = 0;
+@@ -57,8 +57,17 @@
+ 
+ /* Initialized data must remain writable until disable, including panics. */
+ static unsigned int early_row, early_col;
+ static unsigned int early_started, early_disabled, early_panicking;
++/* 0098: set when pmap is about to kill the bootstrap (identity) TTBR0. */
++static unsigned int early_ttbr0_off;
++
++void
++sweet_early_note_ttbr0_off(void)
++{
++	early_ttbr0_off = 1;
++	__asm__ volatile("dsb sy" ::: "memory");
++}
+ 
+ static void
+ sweet_early_clear_row(void)
+ {
+@@ -72,9 +81,9 @@
+ 
+ void
+ sweet_early_putc(char c)
+ {
+-	if (early_disabled) {
++	if (early_disabled || early_ttbr0_off) {
+ 		return;
+ 	}
+ 	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
+ 	if (!early_started) {
+--- a/pexpert/arm/pe_kprintf.c
++++ b/pexpert/arm/pe_kprintf.c
+@@ -11,12 +11,28 @@
+ #include <kern/debug.h>
+ #include <kern/simple_lock.h>
+ #include <os/log_private.h>
+ #include <libkern/section_keywords.h>
++#if defined(SWEET)
++#include <arm64/sweet_early.h>
++#endif
+ 
+ /* Globals */
+ typedef void (*PE_kputc_t)(char);
+ SECURITY_READ_ONLY_LATE(PE_kputc_t) PE_kputc;
++
++#if defined(SWEET)
++/* 0098: mirror every kprintf() character into the ramoops console. */
++static PE_kputc_t sweet_normal_kputc;
++static void
++sweet_tee_kputc(char c)
++{
++	if (sweet_normal_kputc) {
++		sweet_normal_kputc(c);
++	}
++	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
++}
++#endif
+ 
+ // disable_serial_output disables kprintf() *and* unbuffered panic output.
+ SECURITY_READ_ONLY_LATE(bool) disable_serial_output = true;
+ // disable_kprintf_output only disables kprintf().
+@@ -67,8 +83,12 @@
+ 		 * serial doesn't work).
+ 		 */
+ 		PE_kputc = console_write_unbuffered;
+ 	}
++#if defined(SWEET)
++	sweet_normal_kputc = PE_kputc;
++	PE_kputc = sweet_tee_kputc;
++#endif
+ }
+ STARTUP(KPRINTF, STARTUP_RANK_FIRST, PE_init_kprintf);
+ 
+ #ifdef MP_DEBUG
+--- a/osfmk/kern/printf.c
++++ b/osfmk/kern/printf.c
+@@ -159,8 +159,11 @@
+ #include <mach/boolean.h>
+ #include <kern/cpu_number.h>
+ #include <kern/thread.h>
+ #include <kern/debug.h>
++#if defined(SWEET)
++#include <arm64/sweet_early.h>
++#endif
+ #include <kern/sched_prim.h>
+ #include <kern/misc_protos.h>
+ #include <stdarg.h>
+ #include <string.h>
+@@ -847,8 +850,12 @@
+ {
+ 	if (!disableConsoleOutput) {
+ 		console_write_char(c);
+ 	}
++#if defined(SWEET)
++	/* 0098: BSD printf()/IOLog() into the same ramoops console. */
++	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
++#endif
+ 
+ #ifdef MACH_BSD
+ 	if (!kernel_debugger_entry_count) {
+ 		log_putc(c);
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -25,8 +25,12 @@
+  *
+  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+  */
+ #include <string.h>
++#if defined(SWEET)
++/* 0098: stop the identity-VA pstore tee before TTBR0 is switched away. */
++extern void sweet_early_note_ttbr0_off(void);
++#endif
+ #include <stdlib.h>
+ #include <mach_assert.h>
+ #include <mach_ldebug.h>
+ 
+@@ -7554,8 +7558,11 @@
+ 
+ MARK_AS_PMAP_TEXT static void
+ pmap_switch_user_ttb(pmap_t pmap, pmap_cpu_data_t *cpu_data_ptr)
+ {
++#if defined(SWEET)
++	sweet_early_note_ttbr0_off();
++#endif
+ 	if (pmap != kernel_pmap) {
+ 		cpu_data_ptr->cpu_nested_pmap = pmap->nested_pmap;
+ 		cpu_data_ptr->cpu_nested_pmap_attr = (cpu_data_ptr->cpu_nested_pmap == NULL) ?
+ 		    NULL : pmap_get_pt_attr(cpu_data_ptr->cpu_nested_pmap);
+@@ -7583,8 +7590,11 @@
+ 
+ MARK_AS_PMAP_TEXT void
+ pmap_clear_user_ttb_internal(void)
+ {
++#if defined(SWEET)
++	sweet_early_note_ttbr0_off();
++#endif
+ 	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
+ }
+ 
+ void
