@@ -1,0 +1,14 @@
+--- a/osfmk/kperf/kperf.c
++++ b/osfmk/kperf/kperf.c
+@@ -75,8 +75,11 @@
+ 
+ void
+ kperf_init_early(void)
+ {
++	/* 0109: kagura brings up one CPU; ml_wait_max_cpus() can wedge here. */
++	return;
++
+ 	/*
+ 	 * kperf allocates based on the number of CPUs and requires them to all be
+ 	 * accounted for.
+ 	 */
