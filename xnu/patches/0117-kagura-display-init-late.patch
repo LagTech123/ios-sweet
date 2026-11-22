@@ -1,0 +1,70 @@
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -2391,10 +2391,8 @@
+ #endif
+ 	sweet_early_mark(12, "calling pmap_bootstrap");
+ 	pmap_bootstrap(dynamic_memory_begin);
+ 	sweet_early_mark(13, "pmap_bootstrap done");
+-	/* 0110: MDSS register pages become mappable only after pmap_bootstrap. */
+-	sweet_early_display_init();
+ 
+ 	disable_preemption();
+ 
+ 	/*
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -538,8 +538,12 @@
+ 	/* Setup debugging output. */
+ 	sweet_early_mark(16, "calling serial_init");
+ 	const unsigned int serial_exists = serial_init();
+ 	sweet_early_mark(19, "serial_init returned");
++	/* 0117: KMEM io_submap is live by STARTUP_SUB_KPRINTF, so ml_io_map()
++	 * can now map the MDSS flush pages (calling it at pmap_bootstrap time
++	 * took the pre-KMEM pmap_map_bd path and panicked at pmap.c:1887). */
++	sweet_early_display_init();
+ 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
+ 	kprintf("kprintf initialized\n");
+ 	sweet_early_mark(20, "kprintf startup complete");
+ #if !defined(SWEET)
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -171,13 +171,15 @@
+ 
+ void
+ sweet_early_putc(char c)
+ {
+-	if (early_disabled || early_ttbr0_off) {
++	/* 0117: pstore uses the TTBR1 high alias after marker 47/66, so keep
++	 * writing it even when TTBR0 is gone; only FB drawing must stop. */
++	if (early_disabled) {
+ 		return;
+ 	}
+ 	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
+-	if (early_fb_off) {
++	if (early_ttbr0_off || early_fb_off) {
+ 		return;
+ 	}
+ 	if (!early_started) {
+ 		early_started = 1;
+--- a/bsd/dev/kagura_emmc.c
++++ b/bsd/dev/kagura_emmc.c
+@@ -590,17 +590,17 @@
+ {
+ 	sweet_early_mark(89, "kagura_emmc_rootdev: entry");
+ 	if (!kemmc_ready) {
+ 		int error = emmc_map_host();
+-		sweet_early_mark(90, "kagura_emmc_rootdev: host mapped");
+ 		if (error) {
+ 			return error;
+ 		}
++		sweet_early_mark(90, "kagura_emmc_rootdev: host mapped");
+ 		error = emmc_find_root_partition();
+-		sweet_early_mark(91, "kagura_emmc_rootdev: GPT parsed");
+ 		if (error) {
+ 			return error;
+ 		}
++		sweet_early_mark(91, "kagura_emmc_rootdev: GPT parsed");
+ 		int bmajor = bdevsw_add(-1, &emmc_bdevsw);
+ 		if (bmajor < 0) {
+ 			return ENXIO;
+ 		}
