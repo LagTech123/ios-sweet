@@ -1,0 +1,38 @@
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -771,8 +771,9 @@
+ 	sweet_early_mark(64, "startup: before machine_lockdown");
+ 	kernel_bootstrap_log("machine_lockdown");
+ 	machine_lockdown();
+ 	sweet_early_mark(65, "startup: after machine_lockdown");
++	sweet_early_mark(73, "startup: before XNUPOST");
+ 
+ #ifdef CONFIG_XNUPOST
+ 	kern_return_t result = kernel_list_tests();
+ 	result = kernel_do_post();
+@@ -780,12 +781,15 @@
+ 		panic("kernel_do_post: Tests failed with result = 0x%08x", result);
+ 	}
+ 	kernel_bootstrap_log("kernel_do_post - done");
+ #endif /* CONFIG_XNUPOST */
++	sweet_early_mark(74, "startup: after XNUPOST");
+ 
+ #ifdef  IOKIT
++	sweet_early_mark(75, "startup: before PE_lockdown_iokit");
+ 	kernel_bootstrap_log("PE_lockdown_iokit");
+ 	PE_lockdown_iokit();
++	sweet_early_mark(76, "startup: after PE_lockdown_iokit");
+ #endif
+ 	/*
+ 	 * max_cpus must be nailed down by the time PE_lockdown_iokit() finishes,
+ 	 * at the latest
+@@ -799,8 +803,9 @@
+ 
+ 	/*
+ 	 *	Start the user bootstrap.
+ 	 */
++	sweet_early_mark(77, "startup: before bsd_init");
+ #ifdef  MACH_BSD
+ 	bsd_init();
+ #endif
+ 
