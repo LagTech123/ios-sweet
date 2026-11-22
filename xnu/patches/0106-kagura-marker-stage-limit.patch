@@ -1,0 +1,14 @@
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -161,9 +161,10 @@
+ 
+ void
+ sweet_early_mark(unsigned int stage, const char *label)
+ {
+-	if (early_disabled || stage > 63) {
++	/* 0106: kagura uses stages up to 72; 63 silently swallowed 66-72. */
++	if (early_disabled || stage > 99) {
+ 		return;
+ 	}
+ 	uint32_t color = 0xff00ff00u | ((stage & 7u) * 32u << 16);
+ 	/* Keep the colour swatch inside the visible 1080-px line. */
