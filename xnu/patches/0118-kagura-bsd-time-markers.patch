@@ -1,0 +1,56 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -690,25 +690,30 @@
+ 
+ 	/*
+ 	 * Initialize the calendar.
+ 	 */
++	sweet_early_mark(93, "bsd_init: before IOKitInitializeTime");
+ 	bsd_init_kprintf("calling IOKitInitializeTime\n");
+ 	IOKitInitializeTime();
++	sweet_early_mark(94, "bsd_init: after IOKitInitializeTime");
+ 
+ 	/* Initialize the file systems. */
+ 	bsd_init_kprintf("calling vfsinit\n");
+ 	vfsinit();
++	sweet_early_mark(95, "bsd_init: after vfsinit");
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	/* AMFI's MAC policy is built in on SWEET (bsd/kern/sweet_amfi.c). */
+ 	extern void sweet_amfi_policy_register(void);
+ 	sweet_amfi_policy_register();
++	sweet_early_mark(96, "bsd_init: after sweet_amfi_policy_register");
+ #endif
+ 
+ #if SWEET_HFS
+ 	/* HFS is built in on SWEET: register it like its kext would, before mounting root. */
+ 	extern void sweet_hfs_register(void);
+ 	sweet_hfs_register();
++	sweet_early_mark(97, "bsd_init: after sweet_hfs_register");
+ #endif
+ 
+ #if CONFIG_PROC_UUID_POLICY
+ 	/* Initial proc_uuid_policy subsystem */
+@@ -718,8 +723,9 @@
+ 
+ #if SOCKETS
+ 	/* Initialize per-CPU cache allocator */
+ 	mcache_init();
++	sweet_early_mark(98, "bsd_init: after mcache_init");
+ 
+ 	/* Initialize mbuf's. */
+ 	bsd_init_kprintf("calling mbinit\n");
+ 	mbinit();
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -227,9 +227,9 @@
+ void
+ sweet_early_mark(unsigned int stage, const char *label)
+ {
+ 	/* 0106: kagura uses stages up to 72; 63 silently swallowed 66-72. */
+-	if (early_disabled || stage > 99) {
++	if (early_disabled || stage > 120) {
+ 		return;
+ 	}
+ 	uint32_t color = 0xff00ff00u | ((stage & 7u) * 32u << 16);
+ 	/* Keep the colour swatch inside the visible 1080-px line. */
