@@ -1,0 +1,61 @@
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -67,11 +67,10 @@
+  */
+ 
+ #include <debug.h>
+ #include <mach_kdp.h>
+-#if defined(SWEET)
++/* 0099: board_config.h (via sweet_early.h) defines SWEET - include it first. */
+ #include <arm64/sweet_early.h>
+-#endif
+ 
+ #include <mach/boolean.h>
+ #include <mach/machine.h>
+ #include <mach/thread_act.h>
+--- a/pexpert/arm/pe_kprintf.c
++++ b/pexpert/arm/pe_kprintf.c
+@@ -11,11 +11,10 @@
+ #include <kern/debug.h>
+ #include <kern/simple_lock.h>
+ #include <os/log_private.h>
+ #include <libkern/section_keywords.h>
+-#if defined(SWEET)
++/* 0099: board_config.h (via sweet_early.h) defines SWEET. */
+ #include <arm64/sweet_early.h>
+-#endif
+ 
+ /* Globals */
+ typedef void (*PE_kputc_t)(char);
+ SECURITY_READ_ONLY_LATE(PE_kputc_t) PE_kputc;
+--- a/osfmk/kern/printf.c
++++ b/osfmk/kern/printf.c
+@@ -159,11 +159,10 @@
+ #include <mach/boolean.h>
+ #include <kern/cpu_number.h>
+ #include <kern/thread.h>
+ #include <kern/debug.h>
+-#if defined(SWEET)
++/* 0099: board_config.h (via sweet_early.h) defines SWEET. */
+ #include <arm64/sweet_early.h>
+-#endif
+ #include <kern/sched_prim.h>
+ #include <kern/misc_protos.h>
+ #include <stdarg.h>
+ #include <string.h>
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -25,12 +25,10 @@
+  *
+  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+  */
+ #include <string.h>
+-#if defined(SWEET)
+-/* 0098: stop the identity-VA pstore tee before TTBR0 is switched away. */
++/* 0098/0099: stop the identity-VA pstore tee before TTBR0 is switched away. */
+ extern void sweet_early_note_ttbr0_off(void);
+-#endif
+ #include <stdlib.h>
+ #include <mach_assert.h>
+ #include <mach_ldebug.h>
+ 
