@@ -1,0 +1,140 @@
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -22,8 +22,14 @@
+ static unsigned int early_pstore_len;
+ 
+ /* 0098: set when pmap is about to kill the bootstrap (identity) TTBR0. */
+ static unsigned int early_ttbr0_off;
++/* 0102: TTBR1 high-VA alias for the ramoops console zone.  The 0084 L2 TTE
++ * maps PA 0xa6000000 for SWEET_EARLY_PSTORE_VA (VM_MIN + 64 MB) because the
++ * 32 MB L2 block ignores the low bits of 0xa7f00000.  The console zone lives
++ * at PA 0xa7fbe000, i.e. +0x01fbe000 into that block. */
++#define SWEET_EARLY_PSTORE_ALIAS_VA 0xfffffe0005fbe000ULL
++static unsigned int early_fb_off;
+ /* 0101: only tee kprintf/printf after marker 60 (pstore is 256 KB). */
+ static unsigned int early_tee_on;
+ 
+ void
+@@ -42,9 +48,9 @@
+ sweet_early_pstore_putc(char c)
+ {
+ 	volatile uint32_t *header = (volatile uint32_t *)early_pstore;
+ 
+-	if (early_ttbr0_off || !early_pstore || early_pstore_len >= EARLY_PSTORE_SIZE - 12) {
++	if (!early_pstore || early_pstore_len >= EARLY_PSTORE_SIZE - 12) {
+ 		return;
+ 	}
+ 	early_pstore[12 + early_pstore_len++] = (uint8_t)c;
+ 	header[0] = 0;
+@@ -77,10 +83,16 @@
+ static unsigned int early_started, early_disabled, early_panicking;
+ void
+ sweet_early_note_ttbr0_off(void)
+ {
++	if (early_ttbr0_off) {
++		return;
++	}
+ 	early_ttbr0_off = 1;
+-	__asm__ volatile("dsb sy" ::: "memory");
++	early_fb_off = 1;
++	early_pstore = (volatile uint8_t *)(uintptr_t)SWEET_EARLY_PSTORE_ALIAS_VA;
++	__asm__ volatile("dsb sy" ::: "memory");
++	sweet_early_mark(66, "TTBR0 off: pstore switched to high VA alias");
+ }
+ 
+ static void
+ sweet_early_clear_row(void)
+@@ -99,8 +111,11 @@
+ 	if (early_disabled || early_ttbr0_off) {
+ 		return;
+ 	}
+ 	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
++	if (early_fb_off) {
++		return;
++	}
+ 	if (!early_started) {
+ 		early_started = 1;
+ 		sweet_early_clear_row();
+ 	}
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1635,8 +1635,9 @@
+ 
+ void
+ arm_vm_prot_finalize(boot_args * args __unused)
+ {
++	sweet_early_mark(53, "arm_vm_prot_finalize: entry");
+ 	/*
+ 	 * At this point, we are far enough along in the boot process that it will be
+ 	 * safe to free up all of the memory preceeding the kernel.  It may in fact
+ 	 * be safe to do this earlier.
+@@ -1652,8 +1653,9 @@
+ 	 * should be immediately followed by XNU's TEXT segment
+ 	 */
+ 
+ 	ml_static_mfree(phystokv(gPhysBase), segLOWEST - gVirtBase);
++	sweet_early_mark(54, "arm_vm_prot_finalize: first mfree done");
+ 
+ 	/*
+ 	 * KTRR support means we will be mucking with these pages and trying to
+ 	 * protect them; we cannot free the pages to the VM if we do this.
+@@ -1661,12 +1663,14 @@
+ 	if (!segSizePLKDATACONST && !segSizePLKTEXTEXEC && segSizePRELINKTEXT) {
+ 		/* If new segments not present, PRELINK_TEXT is not dynamically sized, free DRAM between it and xnu TEXT */
+ 		ml_static_mfree(segPRELINKTEXTB + segSizePRELINKTEXT, segTEXTB - (segPRELINKTEXTB + segSizePRELINKTEXT));
+ 	}
++	sweet_early_mark(55, "arm_vm_prot_finalize: PRELINK mfree done");
+ 
+ 	/* tighten permissions on kext read only data and code */
+ 	arm_vm_page_granular_RNX(segPRELINKTEXTB, segSizePRELINKTEXT, ARM64_GRANULE_ALLOW_BLOCK);
+ 	arm_vm_page_granular_RNX(segPLKDATACONSTB, segSizePLKDATACONST, ARM64_GRANULE_ALLOW_BLOCK);
++	sweet_early_mark(56, "arm_vm_prot_finalize: RNX done");
+ 
+ 	cpu_stack_alloc(&BootCpuData);
+ 	arm64_replace_bootstack(&BootCpuData);
+ 	ml_static_mfree(phystokv(segBOOTDATAB - gVirtBase + gPhysBase), segSizeBOOTDATA);
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -78,8 +78,10 @@
+  * is included in support of clause 2.2 (b) of the Apple Public License,
+  * Version 2.0.
+  */
+ 
++/* 0102: board_config.h (via sweet_early.h) defines SWEET. */
++#include <arm64/sweet_early.h>
+ #include <sys/param.h>
+ #include <sys/filedesc.h>
+ #include <sys/kernel.h>
+ #include <sys/mount_internal.h>
+@@ -475,8 +477,9 @@
+  */
+ void
+ bsd_init(void)
+ {
++	sweet_early_mark(57, "bsd_init: entry");
+ 	struct uthread *ut;
+ 	vnode_t init_rootvnode = NULLVP;
+ 	struct proc_ro_data kernproc_ro_data = {
+ 		.p_csflags = CS_VALID,
+@@ -500,8 +503,9 @@
+ 
+ 	throttle_init();
+ 
+ 	printf(copyright);
++	sweet_early_mark(58, "bsd_init: after copyright printf");
+ 
+ #if CONFIG_DEV_KMEM
+ 	bsd_init_kprintf("calling dev_kmem_init\n");
+ 	dev_kmem_init();
+--- a/osfmk/prng/prng_random.c
++++ b/osfmk/prng/prng_random.c
+@@ -393,9 +393,8 @@
+ 		n = MIN(nbytes, PAGE_SIZE);
+ 
+ 		// Since "strict FIPS" is disabled, the DRBG will never
+ 		// request a reseed; therefore, we panic on any error
+-		SWEET_MARK(35, "read_erandom: before ccdrbg_generate");
+ 		rc = ccdrbg_generate(&erandom.drbg_info, (struct ccdrbg_state *)erandom.drbg_state, n, buffer_bytes, 0, NULL);
+ 		if (rc != CCDRBG_STATUS_OK) {
+ 			panic("read_erandom ccdrbg error %d", rc);
+ 		}
