@@ -1,0 +1,30 @@
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -18,10 +18,13 @@
+  * XNU boot can be diagnosed after the SoC resets. */
+ #define EARLY_PSTORE_SIZE 0x40000u
+ #define EARLY_PSTORE_MAGIC 0x43474244u
+ static volatile uint8_t *early_pstore = (volatile uint8_t *)(uintptr_t)0xa7fbe000UL;
+ static unsigned int early_pstore_len;
++
++/* 0098: set when pmap is about to kill the bootstrap (identity) TTBR0. */
++static unsigned int early_ttbr0_off;
+ 
+ void
+ sweet_early_pstore_putc(char c)
+ {
+ 	volatile uint32_t *header = (volatile uint32_t *)early_pstore;
+@@ -56,13 +59,10 @@
+ extern unsigned char iso_font[256 * 16];
+ 
+ /* Initialized data must remain writable until disable, including panics. */
+ static unsigned int early_row, early_col;
+ static unsigned int early_started, early_disabled, early_panicking;
+-/* 0098: set when pmap is about to kill the bootstrap (identity) TTBR0. */
+-static unsigned int early_ttbr0_off;
+-
+ void
+ sweet_early_note_ttbr0_off(void)
+ {
+ 	early_ttbr0_off = 1;
+ 	__asm__ volatile("dsb sy" ::: "memory");
