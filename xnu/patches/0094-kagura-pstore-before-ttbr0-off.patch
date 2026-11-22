@@ -1,0 +1,35 @@
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -2258,21 +2258,24 @@
+ #if defined(SWEET)
+ 	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
+ 	sweet_early_relocate(SWEET_EARLY_FB_VA);
+ #endif
+ 	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
++#if defined(SWEET)
++	/*
++	 * 0094: sweet_early_putc() writes the pstore mirror BEFORE the FB glyphs.
++	 * The identity pstore pointer is a low VA and dies the instant TTBR0 is
++	 * switched to the empty table, so repoint it before any further console
++	 * output, not after the flush. Markers 49/50 bracket the second flush.
++	 */
++	sweet_early_set_pstore(SWEET_EARLY_PSTORE_VA + 0xbe000);
++	sweet_early_mark(49, "arm_vm_init: TTBR0 off, pstore alias live");
++#endif
+ 
+ 	flush_mmu_tlb();
+ #if defined(SWEET)
+-	/*
+-	 * TTBR1 now walks cpu_tte (set_mmu_ttb_alternate: dsb sy / msr TTBR1_EL1 /
+-	 * isb sy) and flush_mmu_tlb() has dropped any stale entries, so the pstore
+-	 * alias written by sweet_early_map_final() is reachable at last. This is
+-	 * the first store through it; the old VA=PA pointer is dead from here on
+-	 * (TTBR0 was just invalidated).
+-	 */
+-	sweet_early_set_pstore(SWEET_EARLY_PSTORE_VA + 0xbe000);
++	sweet_early_mark(50, "arm_vm_init: TLB flushed after TTBR0 off");
+ 	sweet_early_mark(47, "arm_vm_init: pstore switched to alias (TTBR1 live, TLB flushed)");
+ #endif
+ 	sweet_early_mark(10, "TTBR0 off; TLB flushed");
+ 	kva_active = TRUE;
+ 	// global table pointers may need to be different due to physical aperture remapping
