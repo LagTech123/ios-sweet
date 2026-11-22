@@ -1,0 +1,20 @@
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -793,13 +793,17 @@
+ 	/*
+ 	 * max_cpus must be nailed down by the time PE_lockdown_iokit() finishes,
+ 	 * at the latest
+ 	 */
++	sweet_early_mark(78, "startup: before vm_set_restrictions");
+ 	vm_set_restrictions(machine_info.max_cpus);
++	sweet_early_mark(79, "startup: after vm_set_restrictions");
+ 
+ 
+ #if KPERF
++	sweet_early_mark(80, "startup: before kperf_init_early");
+ 	kperf_init_early();
++	sweet_early_mark(81, "startup: after kperf_init_early");
+ #endif
+ 
+ 	/*
+ 	 *	Start the user bootstrap.
