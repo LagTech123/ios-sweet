@@ -1,0 +1,46 @@
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1907,11 +1907,11 @@
+ 	tt_entry_t       *boot_tte;
+ 	uint64_t         mem_segments;
+ 	vm_offset_t      ptpage_vaddr;
+ 	vm_map_address_t dynamic_memory_begin;
+ 
+-	sweet_early_mark(27, "arm_vm_init: function entry");
++	sweet_early_mark(27, "arm_vm_init: function entry (0095)");
+ 
+ 	/*
+ 	 * Get the virtual and physical kernel-managed memory base from boot_args.
+ 	 */
+ 	gVirtBase = args->virtBase;
+@@ -2257,19 +2257,23 @@
+ 
+ #if defined(SWEET)
+ 	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
+ 	sweet_early_relocate(SWEET_EARLY_FB_VA);
+ #endif
++#if defined(SWEET)
++	/*
++	 * 0095: repoint the pstore mirror BEFORE TTBR0 is switched (the identity
++	 * low-VA pointer dies with it), then bracket the switch itself so the log
++	 * says exactly where the boot stops. Marker 27 is tagged (0095) to prove
++	 * this log is fresh rather than a leftover from the previous boot.
++	 */
++	sweet_early_set_pstore(SWEET_EARLY_PSTORE_VA + 0xbe000);
++	sweet_early_mark(51, "arm_vm_init: about to switch TTBR0");
++#endif
+ 	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
+ #if defined(SWEET)
+-	/*
+-	 * 0094: sweet_early_putc() writes the pstore mirror BEFORE the FB glyphs.
+-	 * The identity pstore pointer is a low VA and dies the instant TTBR0 is
+-	 * switched to the empty table, so repoint it before any further console
+-	 * output, not after the flush. Markers 49/50 bracket the second flush.
+-	 */
+-	sweet_early_set_pstore(SWEET_EARLY_PSTORE_VA + 0xbe000);
++	sweet_early_mark(52, "arm_vm_init: TTBR0 switch returned");
+ 	sweet_early_mark(49, "arm_vm_init: TTBR0 off, pstore alias live");
+ #endif
+ 
+ 	flush_mmu_tlb();
+ #if defined(SWEET)
