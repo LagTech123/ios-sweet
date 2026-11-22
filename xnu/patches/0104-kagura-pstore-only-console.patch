@@ -1,0 +1,16 @@
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -27,9 +27,12 @@
+  * maps PA 0xa6000000 for SWEET_EARLY_PSTORE_VA (VM_MIN + 64 MB) because the
+  * 32 MB L2 block ignores the low bits of 0xa7f00000.  The console zone lives
+  * at PA 0xa7fbe000, i.e. +0x01fbe000 into that block. */
+ #define SWEET_EARLY_PSTORE_ALIAS_VA 0xfffffe0005fbe000ULL
+-static unsigned int early_fb_off;
++/* 0104: skip the early framebuffer glyph loop on kagura. The pstore
++ * write happens first in sweet_early_putc(); FB drawing after marker
++ * 56 appears to hang (and the panel never shows verbose output). */
++static unsigned int early_fb_off = 1;
+ /* 0101: only tee kprintf/printf after marker 60 (pstore is 256 KB). */
+ static unsigned int early_tee_on;
+ 
+ void
