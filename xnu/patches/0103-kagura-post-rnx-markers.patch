@@ -1,0 +1,60 @@
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1670,11 +1670,14 @@
+ 	arm_vm_page_granular_RNX(segPRELINKTEXTB, segSizePRELINKTEXT, ARM64_GRANULE_ALLOW_BLOCK);
+ 	arm_vm_page_granular_RNX(segPLKDATACONSTB, segSizePLKDATACONST, ARM64_GRANULE_ALLOW_BLOCK);
+ 	sweet_early_mark(56, "arm_vm_prot_finalize: RNX done");
+ 
++	sweet_early_mark(67, "arm_vm_prot_finalize: before cpu_stack_alloc");
+ 	cpu_stack_alloc(&BootCpuData);
++	sweet_early_mark(68, "arm_vm_prot_finalize: after replace_bootstack");
+ 	arm64_replace_bootstack(&BootCpuData);
+ 	ml_static_mfree(phystokv(segBOOTDATAB - gVirtBase + gPhysBase), segSizeBOOTDATA);
++	sweet_early_mark(69, "arm_vm_prot_finalize: BOOTDATA mfree done");
+ 
+ #if __ARM_KERNEL_PROTECT__
+ 	arm_vm_populate_kernel_el0_mappings();
+ #endif /* __ARM_KERNEL_PROTECT__ */
+@@ -1714,8 +1717,9 @@
+ 			}
+ 		}
+ 	}
+ #endif /* XNU_MONITOR */
++	sweet_early_mark(70, "arm_vm_prot_finalize: XNU_MONITOR PTE clear done");
+ 
+ #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+ 	/*
+ 	 * __LAST,__pinst should no longer be executable.
+@@ -1739,8 +1743,9 @@
+ 	 */
+ #endif
+ 
+ 	arm_vm_page_granular_RNX(segDATACONSTB, segSizeDATACONST, ARM64_GRANULE_ALLOW_BLOCK);
++	sweet_early_mark(71, "arm_vm_prot_finalize: DATA_CONST RNX done");
+ 
+ 	__builtin_arm_dsb(DSB_ISH);
+ 	flush_mmu_tlb();
+ }
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -27,8 +27,10 @@
+  */
+ 
+ #include <arm64/machine_machdep.h>
+ #include <arm64/proc_reg.h>
++/* 0103: board_config.h (via sweet_early.h) defines SWEET. */
++#include <arm64/sweet_early.h>
+ #include <arm/machine_cpu.h>
+ #include <arm/cpu_internal.h>
+ #include <arm/cpuid.h>
+ #include <arm/cpu_data.h>
+@@ -512,8 +514,9 @@
+ void
+ machine_lockdown(void)
+ {
+ 	arm_vm_prot_finalize(PE_state.bootArgs);
++	sweet_early_mark(72, "machine_lockdown: arm_vm_prot_finalize returned");
+ 
+ #if CONFIG_KERNEL_INTEGRITY
+ #if KERNEL_INTEGRITY_WT
+ 	/* Watchtower
