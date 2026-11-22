@@ -1,0 +1,100 @@
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -10,8 +10,10 @@
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
+ void sweet_early_pstore_putc(char c);
+ void sweet_early_note_ttbr0_off(void);
++void sweet_early_enable_tee(void);
++int sweet_early_tee_active(void);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_set_pstore(uint64_t base);
+ void sweet_early_disable(void);
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -22,8 +22,22 @@
+ static unsigned int early_pstore_len;
+ 
+ /* 0098: set when pmap is about to kill the bootstrap (identity) TTBR0. */
+ static unsigned int early_ttbr0_off;
++/* 0101: only tee kprintf/printf after marker 60 (pstore is 256 KB). */
++static unsigned int early_tee_on;
++
++void
++sweet_early_enable_tee(void)
++{
++	early_tee_on = 1;
++}
++
++int
++sweet_early_tee_active(void)
++{
++	return early_tee_on;
++}
+ 
+ void
+ sweet_early_pstore_putc(char c)
+ {
+--- a/pexpert/arm/pe_kprintf.c
++++ b/pexpert/arm/pe_kprintf.c
+@@ -27,9 +27,11 @@
+ {
+ 	if (sweet_normal_kputc) {
+ 		sweet_normal_kputc(c);
+ 	}
+-	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
++	if (sweet_early_tee_active()) {
++		sweet_early_pstore_putc(c == '\r' ? '\n' : c);
++	}
+ }
+ #endif
+ 
+ // disable_serial_output disables kprintf() *and* unbuffered panic output.
+--- a/osfmk/kern/printf.c
++++ b/osfmk/kern/printf.c
+@@ -851,9 +851,11 @@
+ 		console_write_char(c);
+ 	}
+ #if defined(SWEET)
+ 	/* 0098: BSD printf()/IOLog() into the same ramoops console. */
+-	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
++	if (sweet_early_tee_active()) {
++		sweet_early_pstore_putc(c == '\r' ? '\n' : c);
++	}
+ #endif
+ 
+ #ifdef MACH_BSD
+ 	if (!kernel_debugger_entry_count) {
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -750,22 +750,29 @@
+ 	load_static_trust_cache();
+ #endif
+ 
+ 	sweet_early_mark(26, "startup: before STARTUP_SUB_LOCKDOWN");
++	sweet_early_mark(60, "startup: before STARTUP_SUB_LOCKDOWN init");
++	sweet_early_enable_tee();
+ 	kernel_startup_initialize_upto(STARTUP_SUB_LOCKDOWN);
++	sweet_early_mark(61, "startup: after STARTUP_SUB_LOCKDOWN init");
+ 
+ 	/*
+ 	 * Get rid of segments used to bootstrap kext loading. This removes
+ 	 * the KLD, PRELINK symtab, LINKEDIT, and symtab segments/load commands.
+ 	 * Must be done prior to lockdown so that we can free (and possibly relocate)
+ 	 * the static KVA mappings used for the jettisoned bootstrap segments.
+ 	 */
++	sweet_early_mark(62, "startup: before OSKextRemoveKextBootstrap");
+ 	kernel_bootstrap_log("OSKextRemoveKextBootstrap");
+ 	OSKextRemoveKextBootstrap();
++	sweet_early_mark(63, "startup: after OSKextRemoveKextBootstrap");
+ 
+ 	/* No changes to kernel text and rodata beyond this point. */
++	sweet_early_mark(64, "startup: before machine_lockdown");
+ 	kernel_bootstrap_log("machine_lockdown");
+ 	machine_lockdown();
++	sweet_early_mark(65, "startup: after machine_lockdown");
+ 
+ #ifdef CONFIG_XNUPOST
+ 	kern_return_t result = kernel_list_tests();
+ 	result = kernel_do_post();
