@@ -1,0 +1,151 @@
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -9,10 +9,14 @@
+ 
+ #if defined(SWEET)
+ #include <stdint.h>
+ #include <kern/misc_protos.h>
+-
+-static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x83401000;
++#include <arm/machine_routines.h>
++
++/* 0110: keep the 4K-aligned splash FB (PA 0x83401000). Never use the DTB
++ * address 0x82000000, which is neither aligned to the FB stride nor mapped
++ * as the framebuffer after the kernel MMU takes over. */
++static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)SWEET_EARLY_FB_BASE;
+ #define EARLY_FB early_fb
+ 
+ /* Mirror the early console into the MSM8996 ramoops zone so a bare-metal
+  * XNU boot can be diagnosed after the SoC resets. */
+@@ -27,12 +31,12 @@
+  * maps PA 0xa6000000 for SWEET_EARLY_PSTORE_VA (VM_MIN + 64 MB) because the
+  * 32 MB L2 block ignores the low bits of 0xa7f00000.  The console zone lives
+  * at PA 0xa7fbe000, i.e. +0x01fbe000 into that block. */
+ #define SWEET_EARLY_PSTORE_ALIAS_VA 0xfffffe0005fbe000ULL
+-/* 0104: skip the early framebuffer glyph loop on kagura. The pstore
+- * write happens first in sweet_early_putc(); FB drawing after marker
+- * 56 appears to hang (and the panel never shows verbose output). */
+-static unsigned int early_fb_off = 1;
++/* 0110: live on-screen text is enabled again. The shim's MDSS/DSI setup
++ * already scans out from SWEET_EARLY_FB_BASE into the command-mode panel;
++ * XNU only writes glyphs and kicks a frame commit on newline. */
++static unsigned int early_fb_off = 0;
+ /* 0101: only tee kprintf/printf after marker 60 (pstore is 256 KB). */
+ static unsigned int early_tee_on;
+ 
+ void
+@@ -68,8 +72,64 @@
+ sweet_early_set_pstore(uint64_t base)
+ {
+ 	early_pstore = (volatile uint8_t *)(uintptr_t)base;
+ 	early_pstore_len = 0;
++}
++
++/* 0110: MDSS/DSI MMIO pages, mapped once the kernel MMU and pmap are live.
++ * The shim configured RGB0 -> LM0 -> INTF1 -> DSI0 (command mode) and set
++ * PP0 autorefresh before XNU started; we only re-arm autorefresh here and
++ * replay its two-register frame commit. Write-only: raw MDSS reads are
++ * forbidden on this SoC (bus hang / forced reboot). */
++#define KAGURA_MDP_CTL_PA   0x00900000ULL
++#define KAGURA_MDP_CTL_SZ   0x3000u      /* INTF_SEL, INTR, CTL0 */
++#define KAGURA_MDP_PP_PA    0x00971000ULL
++#define KAGURA_MDP_PP_SZ    0x1000u      /* PP0_AUTOREFRESH */
++#define CTL0_FLUSH_OFF      0x2018u
++#define CTL0_START_OFF      0x201cu
++#define PP0_AUTOREFRESH_OFF 0x0030u
++#define CTL_FLUSH_CFG       0x00020048U  /* CTL_TOP | LM0 | RGB0 */
++#define CTL_START_GO        0x00000001U
++#define PP0_AUTOREFRESH_ON  0x80000001U
++
++static volatile uint32_t *kagura_mdp_ctl;
++static volatile uint32_t *kagura_mdp_pp;
++static unsigned int kagura_display_ready;
++
++void
++sweet_early_display_init(void)
++{
++	if (kagura_display_ready) {
++		return;
++	}
++	kagura_mdp_ctl = (volatile uint32_t *)ml_io_map(KAGURA_MDP_CTL_PA, KAGURA_MDP_CTL_SZ);
++	kagura_mdp_pp  = (volatile uint32_t *)ml_io_map(KAGURA_MDP_PP_PA, KAGURA_MDP_PP_SZ);
++	kagura_display_ready = 1;
++	if (kagura_mdp_pp) {
++		kagura_mdp_pp[PP0_AUTOREFRESH_OFF / 4] = PP0_AUTOREFRESH_ON;
++		__asm__ volatile("dsb sy" ::: "memory");
++	}
++}
++
++static void
++sweet_early_display_commit(void)
++{
++	if (!kagura_display_ready || !kagura_mdp_ctl) {
++		return;
++	}
++	/* Exact shim kickoff: CTL0_FLUSH then CTL0_START, no MMIO reads. */
++	kagura_mdp_ctl[CTL0_FLUSH_OFF / 4] = CTL_FLUSH_CFG;
++	__asm__ volatile("dsb sy" ::: "memory");
++	kagura_mdp_ctl[CTL0_START_OFF / 4] = CTL_START_GO;
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++static void
++sweet_early_pstore_string(const char *s)
++{
++	while (*s) {
++		sweet_early_pstore_putc(*s++);
++	}
+ }
+ #define EARLY_WIDTH 1080u
+ #define EARLY_HEIGHT 1920u
+ #define EARLY_STRIDE (4352u / 4)
+@@ -90,9 +150,10 @@
+ 	if (early_ttbr0_off) {
+ 		return;
+ 	}
+ 	early_ttbr0_off = 1;
+-	early_fb_off = 1;
++	/* 0110: keep FB glyph rendering on; pstore now lives in the TTBR1
++	 * high alias (0xfffffe0005fbe000), so both consoles stay live. */
+ 	early_pstore = (volatile uint8_t *)(uintptr_t)SWEET_EARLY_PSTORE_ALIAS_VA;
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	sweet_early_mark(66, "TTBR0 off: pstore switched to high VA alias");
+ }
+@@ -129,8 +190,10 @@
+ 	if (c == '\n' || early_col == EARLY_COLS) {
+ 		early_col = 0;
+ 		early_row = (early_row + 1) % EARLY_ROWS;
+ 		sweet_early_clear_row();
++		/* 0110: push the completed line to the command-mode panel. */
++		sweet_early_display_commit();
+ 		if (c == '\n') {
+ 			return;
+ 		}
+ 	}
+@@ -187,18 +250,22 @@
+ 
+ void
+ sweet_early_panic(const char *fmt, va_list *args)
+ {
+-	if (early_disabled || early_panicking) {
++	/* 0111: panic text must reach pstore even if kprintf was disabled or
++	 * tee was never enabled. pstore is either identity PA (early) or the
++	 * TTBR1 high alias (after marker 47); both are always writable. */
++	if (early_panicking) {
+ 		return;
+ 	}
+ 	early_panicking = 1;
+-	sweet_early_string("\nSWEET EARLY PANIC: ");
++	sweet_early_pstore_putc('\n');
++	sweet_early_pstore_string("SWEET EARLY PANIC: ");
+ 	va_list copy;
+ 	va_copy(copy, *args);
+-	_doprnt(fmt, &copy, sweet_early_putc, 16);
++	_doprnt(fmt, &copy, sweet_early_pstore_putc, 16);
+ 	va_end(copy);
+-	sweet_early_putc('\n');
++	sweet_early_pstore_putc('\n');
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
+ void

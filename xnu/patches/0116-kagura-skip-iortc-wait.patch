@@ -1,0 +1,16 @@
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -76,10 +76,11 @@
+ 
+ 	t.tv_sec = 30;
+ 	t.tv_nsec = 0;
+ 
+-// RTC is not present on this target
+-#ifndef BCM2837
++// RTC is not present on this target; kagura has no IORTC service, so the
++// 30-second wait only slows every boot. 0112: skip it on SWEET.
++#if !defined(BCM2837) && !defined(SWEET)
+ 	IOService::waitForService(
+ 		IOService::resourceMatching("IORTC"), &t );
+ #endif
+ #if defined(__i386__) || defined(__x86_64__)

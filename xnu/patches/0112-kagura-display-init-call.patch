@@ -1,0 +1,24 @@
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -2277,9 +2277,9 @@
+ 	 * log stopped at 9 even though the kernel may have continued.  Identity
+ 	 * pointers work while TTBR0 is intact, so defer the switch until the
+ 	 * real pmap takes over.  0095's bracket markers are kept for continuity.
+ 	 */
+-	sweet_early_relocate(0x83401000ULL);
++	sweet_early_relocate(SWEET_EARLY_FB_BASE);
+ 	sweet_early_mark(51, "arm_vm_init: console kept on identity VA=PA");
+ #endif
+ #if defined(SWEET)
+ 	sweet_early_mark(52, "arm_vm_init: TTBR0 switch deferred");
+@@ -2391,8 +2391,10 @@
+ #endif
+ 	sweet_early_mark(12, "calling pmap_bootstrap");
+ 	pmap_bootstrap(dynamic_memory_begin);
+ 	sweet_early_mark(13, "pmap_bootstrap done");
++	/* 0110: MDSS register pages become mappable only after pmap_bootstrap. */
++	sweet_early_display_init();
+ 
+ 	disable_preemption();
+ 
+ 	/*

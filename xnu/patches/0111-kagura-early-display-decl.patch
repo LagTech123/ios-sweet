@@ -1,0 +1,13 @@
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -15,8 +15,10 @@
+ int sweet_early_tee_active(void);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_set_pstore(uint64_t base);
++void sweet_early_display_init(void);
++#define SWEET_EARLY_FB_BASE 0x83401000ULL
+ void sweet_early_disable(void);
+ #else
+ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ {

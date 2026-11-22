@@ -1,0 +1,17 @@
+--- a/pexpert/arm/pe_kprintf.c
++++ b/pexpert/arm/pe_kprintf.c
+@@ -27,11 +27,11 @@
+ {
+ 	if (sweet_normal_kputc) {
+ 		sweet_normal_kputc(c);
+ 	}
+-	if (sweet_early_tee_active()) {
+-		sweet_early_pstore_putc(c == '\r' ? '\n' : c);
+-	}
++	/* 0111: unconditional pstore mirror. The alias at
++	 * 0xfffffe0005fbe000 is valid in TTBR1, so no tee gate is needed. */
++	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
+ }
+ #endif
+ 
+ // disable_serial_output disables kprintf() *and* unbuffered panic output.

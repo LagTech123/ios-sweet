@@ -1,0 +1,40 @@
+--- a/bsd/dev/kagura_emmc.c
++++ b/bsd/dev/kagura_emmc.c
+@@ -22,8 +22,9 @@
+ #include <kern/locks.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
+ #include <libkern/libkern.h>
++#include <arm64/sweet_early.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
+ /* Standard SD Host Controller register map (SDCC1 HC window). */
+@@ -586,14 +587,17 @@
+ 
+ int
+ kagura_emmc_rootdev(dev_t *dev)
+ {
++	sweet_early_mark(89, "kagura_emmc_rootdev: entry");
+ 	if (!kemmc_ready) {
+ 		int error = emmc_map_host();
++		sweet_early_mark(90, "kagura_emmc_rootdev: host mapped");
+ 		if (error) {
+ 			return error;
+ 		}
+ 		error = emmc_find_root_partition();
++		sweet_early_mark(91, "kagura_emmc_rootdev: GPT parsed");
+ 		if (error) {
+ 			return error;
+ 		}
+ 		int bmajor = bdevsw_add(-1, &emmc_bdevsw);
+@@ -609,8 +613,9 @@
+ 		    "kaguraemmc0");
+ 		devfs_make_node(makedev(cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR,
+ 		    0640, "rkaguraemmc0");
+ 		kemmc_ready = true;
++		sweet_early_mark(92, "kagura_emmc_rootdev: device registered");
+ 		printf("KAGURA eMMC: /dev/kaguraemmc0 ready, GPT %s\n",
+ 		    kemmc_partition_name);
+ 	}
+ 	*dev = kemmc_bdev;
