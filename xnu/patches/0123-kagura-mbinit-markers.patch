@@ -1,0 +1,71 @@
+--- a/bsd/kern/uipc_mbuf.c
++++ b/bsd/kern/uipc_mbuf.c
+@@ -105,8 +105,9 @@
+ #include <machine/limits.h>
+ #include <machine/machine_routines.h>
+ 
+ #include <sys/mcache.h>
++#include <arm64/sweet_early.h>
+ #include <net/ntstat.h>
+ 
+ #if INET
+ extern int dump_tcp_reass_qlen(char *, int);
+@@ -1634,16 +1635,18 @@
+ 
+ 	/* pktdata needs to start at 128-bit offset! */
+ 	_CASSERT((offsetof(struct mbuf, m_pktdat) % 16) == 0);
+ 
++	sweet_early_mark(116, "mbinit: before read_random");
+ 	/* Initialize random red zone cookie value */
+ 	_CASSERT(sizeof(mb_redzone_cookie) ==
+ 	    sizeof(((struct pkthdr *)0)->redzone));
+ 	read_random(&mb_redzone_cookie, sizeof(mb_redzone_cookie));
+ 	read_random(&mb_obscure_extref, sizeof(mb_obscure_extref));
+ 	read_random(&mb_obscure_extfree, sizeof(mb_obscure_extfree));
+ 	mb_obscure_extref |= 0x3;
+ 	mb_obscure_extfree |= 0x3;
++	sweet_early_mark(117, "mbinit: after read_random");
+ 
+ 	/* Make sure we don't save more than we should */
+ 	_CASSERT(MCA_SAVED_MBUF_SIZE <= sizeof(struct mbuf));
+ 
+@@ -1653,10 +1656,12 @@
+ 
+ 	/* This should be a sane (at least even) value by now */
+ 	VERIFY(nmbclusters != 0 && !(nmbclusters & 0x1));
+ 
++	sweet_early_mark(118, "mbinit: before mbuf_table_init");
+ 	/* Setup the mbuf table */
+ 	mbuf_table_init();
++	sweet_early_mark(119, "mbinit: after mbuf_table_init");
+ 
+ 	/*
+ 	 * Allocate cluster slabs table:
+ 	 *
+@@ -1708,9 +1713,16 @@
+ 	 * on the CPU cache boundary; this code assumes that we never
+ 	 * uninitialize this framework, since the original address
+ 	 * before alignment is not saved.
+ 	 */
++	sweet_early_mark(120, "mbinit: before ml_wait_max_cpus");
++#if defined(SWEET)
++	/* 0123: same wedge as kperf_init_early()/mcache_init(); cpus=1. */
++	ncpu = 1;
++#else
+ 	ncpu = ml_wait_max_cpus();
++#endif
++	sweet_early_mark(121, "mbinit: after cpu wait");
+ 
+ 	/* Calculate the number of pages assigned to the cluster pool */
+ 	mcl_pages = (nmbclusters << MCLSHIFT) / PAGE_SIZE;
+ 	mcl_paddr = zalloc_permanent(mcl_pages * sizeof(ppnum_t),
+@@ -1733,8 +1745,9 @@
+ 	if (initmcl < m_minlimit(MC_BIGCL)) {
+ 		initmcl = m_minlimit(MC_BIGCL);
+ 	}
+ 
++	sweet_early_mark(122, "mbinit: before freelist prime");
+ 	lck_mtx_lock(mbuf_mlock);
+ 
+ 	/*
+ 	 * For classes with non-zero minimum limits, populate their freelists
