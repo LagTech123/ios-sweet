@@ -1,0 +1,88 @@
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -10,8 +10,9 @@
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
+ void sweet_early_fb_putc(char c);
+ void sweet_early_pstore_putc(char c);
++void sweet_early_pstore_string(const char *s);
+ void sweet_early_note_ttbr0_off(void);
+ void sweet_early_enable_tee(void);
+ int sweet_early_tee_active(void);
+ void sweet_early_panic(const char *fmt, va_list *args);
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -122,9 +122,9 @@
+ 	kagura_mdp_ctl[CTL0_START_OFF / 4] = CTL_START_GO;
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
+-static void
++void
+ sweet_early_pstore_string(const char *s)
+ {
+ 	while (*s) {
+ 		sweet_early_pstore_putc(*s++);
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -85,8 +85,11 @@
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/filedesc.h>
+ #include <sys/kernel.h>
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <arm64/sweet_early.h>
++#endif
+ #include <sys/proc_internal.h>
+ #include <sys/kauth.h>
+ #include <sys/user.h>
+ #include <sys/socketvar.h>
+@@ -5146,8 +5149,16 @@
+ 			 */
+ 			task_set_darkwake_mode(new_task, vm_darkwake_mode);
+ 		}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		{
++			char _sweet_buf[128];
++			snprintf(_sweet_buf, sizeof(_sweet_buf), "SWEET EXEC: %s (pid=%d)\n",
++			    p->p_comm, proc_getpid(p));
++			sweet_early_pstore_string(_sweet_buf);
++		}
++#endif
+ #if CONFIG_DTRACE
+ 		dtrace_thread_didexec(imgp->ip_new_thread);
+ 
+ 		if ((dtrace_proc_waitfor_hook = dtrace_proc_waitfor_exec_ptr) != NULL) {
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -85,8 +85,11 @@
+ #include <sys/tty.h>
+ #include <sys/time.h>
+ #include <sys/resource.h>
+ #include <sys/kernel.h>
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <arm64/sweet_early.h>
++#endif
+ #include <sys/wait.h>
+ #include <sys/file_internal.h>
+ #include <sys/vnode_internal.h>
+ #include <sys/syslog.h>
+@@ -1472,8 +1475,17 @@
+ 	struct task *task = proc_task(p);
+ 	struct uthread *ut;
+ 	int error = 0;
+ 	bool proc_exiting = false;
++
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	{
++		char _sweet_buf[128];
++		snprintf(_sweet_buf, sizeof(_sweet_buf), "SWEET EXIT: %s (pid=%d, status=0x%x)\n",
++		    p->p_comm, proc_getpid(p), rv);
++		sweet_early_pstore_string(_sweet_buf);
++	}
++#endif
+ 
+ #if DEVELOPMENT || DEBUG
+ 	/*
+ 	 * Debug boot-arg: panic here if matching process is exiting with non-zero code.
