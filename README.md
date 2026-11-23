@@ -31,6 +31,8 @@ No `AppleSEPManager` stub is needed — seputil never calls `IOServiceMatching` 
 plus `SWEET SEP:` before/after-RLOCK IOLogs (`strstr` is unavailable in the kernel; `strncmp` is
 used). Awaiting verification and a p54 payload write.
 
+**0127 and 0128 were deployed and disproved the earlier theory.** The registry `RLOCK` is fine (all 18 before/after pairs complete) and seputil never asks for `/arm-io/sep`. 0128 added fine-grained exec markers and the sailfish IOKit-quiesce fix; the log now ends at `exec seputil` followed by `SWEET EXECP: 0 in process_signature` — the stall is **inside `process_signature()`** in `bsd/kern/kern_exec.c`, after the `exec` printf and before it can return. 0129 (pushed, CI 45259406943) adds six markers inside that function to name the exact call. The eMMC driver was audited and cleared (CMD17 sector loop, 64-bit LBA, per-sector status clears).
+
 | Area | State |
 | --- | --- |
 | Boot chain | Sony ABL → shim (`SWEETXNU` payload loader) → XNU at EL1, MMU off |
