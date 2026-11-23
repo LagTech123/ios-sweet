@@ -79,4 +79,4 @@ apply to `kagura`.
 
 ## Made by
 - Claude (Free tier with MCP Connector)
-- OpenCode (DeepSeek V4.1 Flash, MiMo-V2.6-Flash, Big Pickle)
+- OpenCode (DeepSeek V4.1 Flash, MiMo-V2.6-Flash, Big Pickle, Hy4 Flash)
