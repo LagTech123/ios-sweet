@@ -10,35 +10,31 @@ userland target.
 > security model is mostly switched off. The root image is written into the `userdata`
 > partition, so **it erases Android's user data**.
 
-## Status (2026-11-22)
+## Status (2026-11-23) — iOS userland reached
 
-The shim boots and hands off to XNU, which runs through its early VM setup. Kernel consoles are
-captured from the ramoops/pstore region at `0xa7fbe000`, so every boot can leave a log even when
-the real console does not exist yet. `arm_vm_init()` entry, memory-size checks, `early_random()` +
-DRBG, `arm_vm_prot_init()` and `arm_set_user_tbi()` all complete.
-
-**Important correction (2026-11-22):** logs that stopped after instrumentation marker 9 did *not*
-prove a kernel hang. With `__ARM_16K_PG__` the L2 translation block covers **32 MB**, but the early
-console aliases used physical bases `0x83400000` (framebuffer) and `0xa7f00000` (ramoops), neither
-of which is 32 MB-aligned. The block descriptors therefore map `0x82000000` and `0xa6000000` —
-ordinary RAM — so console writes after the VA switch never reached the real framebuffer or
-pstore. Earlier theories that the kernel stopped at the TTBR0 switch, an ASID issue or a pstore
-pointer bug were based on those missing log lines and are retracted; the kernel may have kept
-running well past marker 9.
-
-Patch `0096` (currently the head of `kagura`) keeps the early console on its identity VA=PA
-pointers and defers the TTBR0 switch, so later boot stages should become observable. It has been
-built in CI but has not yet been boot-tested on the device at the time of writing.
+The shim boots the XNU kernel on the Xperia XZ, the HFSX root mounts from eMMC, and Apple's
+**iOS 16.7.16 `launchd` runs its boot tasks**. The latest boot log
+(`D:\\xz\\shimlogs\\xnu-0125-fulltrace-20261123.txt`, 18,932 B) shows:
+`Darwin Bootstrapper Version 7.0.0`, root remounted read-write
+(`/dev/kaguraemmc0 on / (hfs, local, journaled, noatime)`), `lo0` up, libignition attempting
+preboot, `mount-phase-1` and `data-protection` boot tasks running, and `exec seputil` — with no
+panic. `SWEET FB: AppleCLCD 1080x1920 ... presented as 1125x2436` confirms the built-in
+IOMobileFramebuffer is presenting into the panel framebuffer.
 
 | Area | State |
 | --- | --- |
 | Boot chain | Sony ABL → shim (`SWEETXNU` payload loader) → XNU at EL1, MMU off |
-| Early console | ramoops at `0xa7fbe000`, readable from TWRP; 0096 keeps it on identity VA=PA |
-| XNU early boot | `arm_vm_init()` entry, memory checks, `early_random()` + DRBG, `arm_vm_prot_init()`, `arm_set_user_tbi()` complete |
-| Past `arm_vm_init()` | not confirmed yet — logs after marker 9 were blind before 0096 |
-| Display | MDP5 scanout works from the shim; the XNU early framebuffer alias is being corrected |
-| eMMC / storage | driver from patch `0085` present (`bsd/dev/kagura_emmc.c`, `/kagura-emmc` ADT node, boot args `rd=kaguraemmc0 emmcroot=userdata`), compile-tested only, never runtime-tested |
-| Userland | not reached |
+| Early console | ramoops at `0xa7fbe000` + live LCD glyphs; all kernel/daemon console bytes tee'd into pstore |
+| XNU early boot | Full `bsd_init()` completes; global `ml_set_max_cpus(1)` avoids the single-CPU wait wedge |
+| eMMC / storage | `kagura_emmc.c` (0085) reads GPT + CMD17/CMD24; `/dev/kaguraemmc0` is the root device |
+| Root filesystem | HFSX image at p54 LBA 0, SWEETXNU payload at LBA 46,563,000; XNU remounts `/` RW |
+| Userland | **`launchd` running boot tasks** (mount-phase-1, data-protection, seputil); next: backboardd/SpringBoard |
+| Display | Shim MDP5 + live FB glyphs; `sweet_early_display_commit()` (CTL0_FLUSH/START) fires on every `AppleCLCD::present()` |
+
+Boot args required: `rd=kaguraemmc0 emmcroot=userdata rootrw=1 emmcrw=1
+unentitled_ios_sim_launch=1 cs_enforcement_disable=1 amfi_get_out_of_my_way=1` — the last three
+are needed because the kernel is built `XNU_TARGET_OS_OSX` and otherwise kills iOS binaries with
+`EXEC_EXIT_REASON_WRONG_PLATFORM` (namespace 9 code 0xe).
 
 ## Build and test
 
