@@ -1,0 +1,75 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7452,10 +7452,12 @@
+ 	/* If the code signature came through the image activation path, we skip the
+ 	 * taskgated / externally attached path. */
+ 	if (imgp->ip_csflags & CS_SIGNED) {
+ 		error = 0;
++		sweet_early_pstore_string("SWEET EXECP: 0a CS_SIGNED set, goto done\n");
+ 		goto done;
+ 	}
++	sweet_early_pstore_string("SWEET EXECP: 0a CS_SIGNED clear\n");
+ 
+ 	/* The rest of the code is for signatures that either already have been externally
+ 	 * attached (likely, but not necessarily by a previous run through the taskgated
+ 	 * path), or that will now be attached by taskgated. */
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7460,8 +7460,9 @@
+ 	 * attached (likely, but not necessarily by a previous run through the taskgated
+ 	 * path), or that will now be attached by taskgated. */
+ 
+ 	kr = task_get_task_access_port(proc_task(p), &port);
++	sweet_early_pstore_string("SWEET EXECP: 0c after task_get_task_access_port\n");
+ 	if (KERN_SUCCESS != kr || !IPC_PORT_VALID(port)) {
+ 		error = 0;
+ 		if (require_success) {
+ 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7542,8 +7542,9 @@
+ 		}
+ 	}
+ 
+ done:
++	sweet_early_pstore_string("SWEET EXECP: 0d at done label\n");
+ 	if (0 == error) {
+ 		/*
+ 		 * Update the new process's signature-dependent process state.
+ 		 * state.
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7549,8 +7549,9 @@
+ 		 * state.
+ 		 */
+ 
+ 		error = proc_process_signature(p, &signature_failure_reason);
++		sweet_early_pstore_string("SWEET EXECP: 0e after proc_process_signature\n");
+ 	}
+ 
+ 	if (0 == error) {
+ 		/*
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7559,8 +7559,9 @@
+ 		 * but for the main thread the signature was not yet attached
+ 		 * at that time.
+ 		 */
+ 		kr = thread_process_signature(imgp->ip_new_thread, proc_get_task_raw(p));
++		sweet_early_pstore_string("SWEET EXECP: 0f after thread_process_signature\n");
+ 
+ 		if (kr != KERN_SUCCESS) {
+ 			error = EINVAL;
+ 			signature_failure_reason = os_reason_create(OS_REASON_EXEC, EXEC_EXIT_REASON_MACHINE_THREAD);
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7603,8 +7603,9 @@
+ 	}
+ 
+ 	/* If we hit this, we likely would have leaked an exit reason */
+ 	assert(signature_failure_reason == OS_REASON_NULL);
++	sweet_early_pstore_string("SWEET EXECP: 0g before return\n");
+ 	return error;
+ }
+ 
+ /*
