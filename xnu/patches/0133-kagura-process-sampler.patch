@@ -1,0 +1,59 @@
+--- a/bsd/kern/kern_sig.c
++++ b/bsd/kern/kern_sig.c
+@@ -2053,10 +2053,10 @@
+ 	prop = sigprop[signum];
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	if (p != PROC_NULL && proc_getpid(p) > 3) {
+-		printf("SWEET SIG: pid=%d name=%s sig=%d flavor=%d\n",
+-		    proc_getpid(p), p->p_comm, signum, flavor);
++		printf("SWEET SIG: pid=%d name=%s sig=%d flavor=%d from=%d\n",
++		    proc_getpid(p), p->p_comm, signum, flavor, proc_selfpid());
+ 	}
+ #endif
+ 
+ #if SIGNAL_DEBUG
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -69,13 +69,23 @@
+ 	}
+ 	if (sweet_sample_names[0] == '-') {
+ 		return;
+ 	}
+-	(void)tsleep(&chan, PZERO, "sweetsmp", 90 * hz);
++	/* 0133: boot-args smpfirst / smpevery (seconds) for short-lived boots. */
++	int first = 90, every = 120;
++	(void)PE_parse_boot_argn("smpfirst", &first, sizeof(first));
++	(void)PE_parse_boot_argn("smpevery", &every, sizeof(every));
++	if (first < 1) {
++		first = 1;
++	}
++	if (every < 1) {
++		every = 1;
++	}
++	(void)tsleep(&chan, PZERO, "sweetsmp", first * hz);
+ 	for (int i = 0; i < 40; i++) {
+ 		printf("SMP --- sample %d\n", i);
+ 		proc_iterate(PROC_ALLPROCLIST, sweet_sample_proc, NULL, NULL, NULL);
+-		(void)tsleep(&chan, PZERO, "sweetsmp", 120 * hz);
++		(void)tsleep(&chan, PZERO, "sweetsmp", every * hz);
+ 	}
+ }
+ 
+ void
+--- a/bsd/dev/kagura_emmc.c
++++ b/bsd/dev/kagura_emmc.c
+@@ -616,8 +616,13 @@
+ 		kemmc_ready = true;
+ 		sweet_early_mark(92, "kagura_emmc_rootdev: device registered");
+ 		printf("KAGURA eMMC: /dev/kaguraemmc0 ready, GPT %s\n",
+ 		    kemmc_partition_name);
++		{
++			/* 0133: the sweet UFS path starts the sampler; kagura never did. */
++			extern void sweet_sample_start(void);
++			sweet_sample_start();
++		}
+ 	}
+ 	*dev = kemmc_bdev;
+ 	return 0;
+ }
