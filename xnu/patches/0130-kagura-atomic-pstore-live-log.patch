@@ -1,0 +1,162 @@
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -23,8 +23,11 @@
+ #define EARLY_PSTORE_SIZE 0x40000u
+ #define EARLY_PSTORE_MAGIC 0x43474244u
+ static volatile uint8_t *early_pstore = (volatile uint8_t *)(uintptr_t)0xa7fbe000UL;
+ static unsigned int early_pstore_len;
++/* 0130: the console tee runs on many threads; a per-byte lock stops the
++ * shared length from being overwritten and whole telemetry lines vanishing. */
++static volatile uint32_t sweet_pstore_lock;
+ 
+ /* 0098: set when pmap is about to kill the bootstrap (identity) TTBR0. */
+ static unsigned int early_ttbr0_off;
+ /* 0102: TTBR1 high-VA alias for the ramoops console zone.  The 0084 L2 TTE
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -55,9 +55,13 @@
+ sweet_early_pstore_putc(char c)
+ {
+ 	volatile uint32_t *header = (volatile uint32_t *)early_pstore;
+ 
++	while (__sync_lock_test_and_set(&sweet_pstore_lock, 1u)) {
++		/* spin: only a few instructions hold this */
++	}
+ 	if (!early_pstore || early_pstore_len >= EARLY_PSTORE_SIZE - 12) {
++		__sync_lock_release(&sweet_pstore_lock);
+ 		return;
+ 	}
+ 	early_pstore[12 + early_pstore_len++] = (uint8_t)c;
+ 	header[0] = 0;
+@@ -65,8 +69,9 @@
+ 	header[2] = early_pstore_len;
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	header[0] = EARLY_PSTORE_MAGIC;
+ 	__asm__ volatile("dsb sy" ::: "memory");
++	__sync_lock_release(&sweet_pstore_lock);
+ }
+ 
+ void
+ sweet_early_set_pstore(uint64_t base)
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -220,8 +220,50 @@
+ 	}
+ 	early_col++;
+ }
+ 
++/*
++ * 0130: redraw the tail of the console ring into the live panel framebuffer.
++ * Only glyphs are written here -- no pstore tee -- so replaying the log does
++ * not duplicate entries in the persistent console.
++ */
++void
++sweet_early_draw_console_tail(const char *buf, unsigned int len)
++{
++	if (early_disabled || early_fb_off || buf == NULL || len == 0) {
++		return;
++	}
++	early_col = 0;
++	early_row = 0;
++	sweet_early_clear_row();
++	for (unsigned int i = 0; i < len; i++) {
++		unsigned char c = (unsigned char)buf[i];
++		if (c == '\n' || c == '\r' || early_col == EARLY_COLS) {
++			early_col = 0;
++			early_row = (early_row + 1) % EARLY_ROWS;
++			sweet_early_clear_row();
++			if (c == '\n' || c == '\r') {
++				continue;
++			}
++		}
++		const unsigned char *glyph = iso_font + c * 16;
++		for (unsigned int gy = 0; gy < 16; gy++) {
++			for (unsigned int sy = 0; sy < EARLY_SCALE; sy++) {
++				volatile uint32_t *line = EARLY_FB +
++				    (early_row * EARLY_CELL_H + gy * EARLY_SCALE + sy) * EARLY_STRIDE +
++				    early_col * EARLY_CELL_W;
++				for (unsigned int gx = 0; gx < 8; gx++) {
++					uint32_t pixel = (glyph[gy] & (1u << gx)) ? 0xffffffffu : 0xff000000u;
++					for (unsigned int sx = 0; sx < EARLY_SCALE; sx++) {
++						line[gx * EARLY_SCALE + sx] = pixel;
++					}
++				}
++			}
++		}
++		early_col++;
++	}
++}
++
+ static void
+ sweet_early_string(const char *s)
+ {
+ 	while (*s) {
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -11,8 +11,9 @@
+ void sweet_early_putc(char c);
+ void sweet_early_fb_putc(char c);
+ void sweet_early_pstore_putc(char c);
+ void sweet_early_pstore_string(const char *s);
++void sweet_early_draw_console_tail(const char *buf, unsigned int len);
+ void sweet_early_note_ttbr0_off(void);
+ void sweet_early_enable_tee(void);
+ int sweet_early_tee_active(void);
+ void sweet_early_panic(const char *fmt, va_list *args);
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -710,8 +710,30 @@
+  * Copy console bytes [*pos, total) (at most max) for live log streaming
+  * (sweet_usb.c). A reader that fell more than the ring behind skips ahead.
+  * Returns the byte count; *pos advances.
+  */
++/* 0130: mirror the newest console bytes into the live panel framebuffer. */
++void sweet_log_draw_fb(void);
++
++void
++sweet_log_draw_fb(void)
++{
++	static uint64_t last_total;
++	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
++	if (total == last_total || total == 0) {
++		return;
++	}
++	last_total = total;
++	enum { LINES = 20 };
++	uint32_t want = (uint32_t)MIN((uint64_t)(LINES * 80u), total);
++	static char tail[LINES * 80];
++	uint64_t start = total - want;
++	for (uint32_t i = 0; i < want; i++) {
++		tail[i] = sweet_log_ring[(start + i) % SWEET_LOG_SIZE];
++	}
++	sweet_early_draw_console_tail(tail, want);
++}
++
+ uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
+ 
+ uint32_t
+ sweet_log_copy(uint64_t *pos, char *out, uint32_t max)
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -47,8 +47,9 @@
+ #include <IOKit/IOWorkLoop.h>
+ #include <IOKit/IOTimerEventSource.h>
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ extern "C" void sweet_early_display_commit(void);
++extern "C" void sweet_log_draw_fb(void);
+ #endif
+ #include <IOKit/system.h>
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -404,8 +404,9 @@
+ 	}
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	/* 0125: command-mode DSI panel needs an explicit kick after each
+ 	 * blit into the continuous-splash framebuffer at 0x83401000. */
++	sweet_log_draw_fb();
+ 	sweet_early_display_commit();
+ #endif
+ }
+ 
