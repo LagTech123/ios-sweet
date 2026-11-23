@@ -46,6 +46,20 @@ unentitled_ios_sim_launch=1 cs_enforcement_disable=1 amfi_get_out_of_my_way=1` �
 are needed because the kernel is built `XNU_TARGET_OS_OSX` and otherwise kills iOS binaries with
 `EXEC_EXIT_REASON_WRONG_PLATFORM` (namespace 9 code 0xe).
 
+## Related ports
+
+- [joranv1/ios-sailfish](https://github.com/joranv1/ios-sailfish) — sibling fork of the same
+  `dipa-studio/ios-sweet` upstream, running iOS 16.7.16 on a Google Pixel 1 (Snapdragon 821 /
+  Adreno 530, the same GPU family as kagura). It reaches the lock screen with GPU-accelerated
+  CoreAnimation, Wi-Fi, touch and battery. Its patch `0166` identifies an iOS-specific IOKit bug
+  relevant to our current `seputil` stall: with no `kernelmanagerd`,
+  `OSKext::iokitDaemonAvailable()` leaves a registry busy-count hold that is never released, so
+  IOKit never quiesces. Our tree carries the same unguarded code; a 0128 port is planned. The same
+  patch adds the `IOAcceleratorES` service stub needed later for backboardd. Its storage driver is
+  UFS, so that part is not portable to kagura's eMMC.
+- [MakrSas/ios-topaz](https://github.com/MakrSas/ios-topaz) — source of the IOKit-quiesce and
+  `IOAcceleratorES` findings used by ios-sailfish.
+
 ## Build and test
 
 - The kernel is built by GitHub Actions (`.github/workflows/xnu.yml`, `blacktop/darwin-xnu-build`):
