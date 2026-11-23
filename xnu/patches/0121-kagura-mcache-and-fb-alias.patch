@@ -1,0 +1,108 @@
+--- a/bsd/kern/mcache.c
++++ b/bsd/kern/mcache.c
+@@ -64,8 +64,9 @@
+ #include <machine/limits.h>
+ #include <machine/machine_routines.h>
+ 
+ #include <string.h>
++#include <arm64/sweet_early.h>
+ 
+ #include <sys/mcache.h>
+ 
+ #define MCACHE_SIZE(n) \
+@@ -182,9 +183,16 @@
+ 	char name[32];
+ 
+ 	VERIFY(mca_trn_max >= 2);
+ 
++	sweet_early_mark(102, "mcache_init: before ml_wait_max_cpus");
++#if defined(SWEET)
++	/* 0121: ml_wait_max_cpus() wedges with cpus=1 (same stall as kperf). */
++	ncpu = 1;
++#else
+ 	ncpu = ml_wait_max_cpus();
++#endif
++	sweet_early_mark(103, "mcache_init: after cpu wait");
+ 	(void) mcache_cache_line_size();        /* prime it */
+ 
+ 	mcache_reap_tcall = thread_call_allocate(mcache_reap_timeout, NULL);
+ 	mcache_update_tcall = thread_call_allocate(mcache_update, NULL);
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -177,9 +177,11 @@
+ 	if (early_disabled) {
+ 		return;
+ 	}
+ 	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
+-	if (early_ttbr0_off || early_fb_off) {
++	/* 0121: FB now uses the TTBR1 high alias, so keep glyphs flowing even
++	 * after the bootstrap TTBR0 is gone (IOWatchdog et al. remain visible). */
++	if (early_fb_off) {
+ 		return;
+ 	}
+ 	if (!early_started) {
+ 		early_started = 1;
+@@ -240,9 +242,12 @@
+ 		}
+ 	}
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	sweet_early_string("SWEET EARLY ");
+-	if (stage >= 10) {
++	if (stage >= 100) {
++		sweet_early_putc((char)('0' + stage / 100));
++		sweet_early_putc((char)('0' + (stage / 10) % 10));
++	} else if (stage >= 10) {
+ 		sweet_early_putc((char)('0' + stage / 10));
+ 	}
+ 	sweet_early_putc((char)('0' + stage % 10));
+ 	sweet_early_string(": ");
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -2277,9 +2277,12 @@
+ 	 * log stopped at 9 even though the kernel may have continued.  Identity
+ 	 * pointers work while TTBR0 is intact, so defer the switch until the
+ 	 * real pmap takes over.  0095's bracket markers are kept for continuity.
+ 	 */
+-	sweet_early_relocate(SWEET_EARLY_FB_BASE);
++	/* 0121: TTBR1 is live by marker 48, so draw into the high-VA alias of
++	 * the real framebuffer (SWEET_EARLY_FB_VA maps PA 0x83400000; +0x1000
++	 * is the splash FB at 0x83401000), not the identity VA=PA pointer. */
++	sweet_early_relocate(SWEET_EARLY_FB_VA + 0x1000ULL);
+ 	sweet_early_mark(51, "arm_vm_init: console kept on identity VA=PA");
+ #endif
+ #if defined(SWEET)
+ 	sweet_early_mark(52, "arm_vm_init: TTBR0 switch deferred");
+--- a/pexpert/arm/pe_kprintf.c
++++ b/pexpert/arm/pe_kprintf.c
+@@ -27,11 +27,11 @@
+ {
+ 	if (sweet_normal_kputc) {
+ 		sweet_normal_kputc(c);
+ 	}
+-	/* 0111: unconditional pstore mirror. The alias at
+-	 * 0xfffffe0005fbe000 is valid in TTBR1, so no tee gate is needed. */
+-	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
++	/* 0121: route through the same glyph renderer + newline CTL0_START
++	 * commit used by sweet_early_mark(), so kernel text keeps scrolling. */
++	sweet_early_putc(c);
+ }
+ #endif
+ 
+ // disable_serial_output disables kprintf() *and* unbuffered panic output.
+--- a/osfmk/kern/printf.c
++++ b/osfmk/kern/printf.c
+@@ -850,12 +850,10 @@
+ 	if (!disableConsoleOutput) {
+ 		console_write_char(c);
+ 	}
+ #if defined(SWEET)
+-	/* 0098: BSD printf()/IOLog() into the same ramoops console. */
+-	if (sweet_early_tee_active()) {
+-		sweet_early_pstore_putc(c == '\r' ? '\n' : c);
+-	}
++	/* 0121: BSD printf()/IOLog() through glyphs + newline frame commit. */
++	sweet_early_putc(c);
+ #endif
+ 
+ #ifdef MACH_BSD
+ 	if (!kernel_debugger_entry_count) {
