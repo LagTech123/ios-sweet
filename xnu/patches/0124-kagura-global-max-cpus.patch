@@ -1,0 +1,20 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -478,8 +478,17 @@
+ void
+ bsd_init(void)
+ {
+ 	sweet_early_mark(57, "bsd_init: entry");
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* 0124: ml_set_max_cpus() is otherwise only called from the async
++	 * SweetCPU::startAll() IOKit thread, so every early ml_wait_max_cpus()
++	 * caller sleeps forever. With cpus=1 the answer is known here; publish
++	 * it once so all callers (mcache, mbinit, workqueue, sysctl) return. */
++	extern void ml_set_max_cpus(unsigned int);
++	ml_set_max_cpus(1);
++	sweet_early_mark(123, "bsd_init: max_cpus published (1)");
++#endif
+ 	struct uthread *ut;
+ 	vnode_t init_rootvnode = NULLVP;
+ 	struct proc_ro_data kernproc_ro_data = {
+ 		.p_csflags = CS_VALID,
