@@ -1,0 +1,392 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -4589,12 +4589,14 @@
+ 		}
+ 	}
+ #endif
+ 
++	sweet_early_pstore_string("SWEET EXECP: P3 before exec-copy terminate\n");
+ 	/* terminate the new task if exec failed  */
+ 	if (new_task != NULL && task_is_exec_copy(new_task)) {
+ 		task_terminate_internal(new_task);
+ 	}
++	sweet_early_pstore_string("SWEET EXECP: P4 after exec-copy terminate\n");
+ 
+ 	if (exec_failure_reason && !spawn_no_exec) {
+ 		psignal_with_reason(p, SIGKILL, exec_failure_reason);
+ 		exec_failure_reason = NULL;
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -4642,12 +4642,14 @@
+ 	 * Do not terminate the current task, if proc_exec_switch_task did not
+ 	 * switch the tasks, terminating the current task without the switch would
+ 	 * result in loosing the SIGKILL status.
+ 	 */
++	sweet_early_pstore_string("SWEET EXECP: P5 before task_did_exec\n");
+ 	if (task_did_exec(old_task)) {
+ 		/* Terminate the current task, since exec will start in new task */
+ 		task_terminate_internal(old_task);
+ 	}
++	sweet_early_pstore_string("SWEET EXECP: P6 after old_task terminate\n");
+ 
+ 	/* Release the thread ref returned by cloneproc/fork1 */
+ 	if (imgp != NULL && imgp->ip_new_thread) {
+ 		/* wake up the new thread */
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -4650,9 +4650,11 @@
+ 
+ 	/* Release the thread ref returned by cloneproc/fork1 */
+ 	if (imgp != NULL && imgp->ip_new_thread) {
+ 		/* wake up the new thread */
++		sweet_early_pstore_string("SWEET EXECP: P7 before task_clear_return_wait\n");
+ 		task_clear_return_wait(get_threadtask(imgp->ip_new_thread), TCRW_CLEAR_FINAL_WAIT);
++		sweet_early_pstore_string("SWEET EXECP: P8 after task_clear_return_wait\n");
+ 		thread_deallocate(imgp->ip_new_thread);
+ 		imgp->ip_new_thread = NULL;
+ 	}
+ 
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -4671,8 +4671,9 @@
+ 	if (inherit != NULL) {
+ 		ipc_importance_release(inherit);
+ 	}
+ 
++	sweet_early_pstore_string("SWEET EXECP: P9 posix_spawn return\n");
+ 	assert(exec_failure_reason == NULL);
+ 	return error;
+ }
+ 
+--- a/osfmk/kern/task.c
++++ b/osfmk/kern/task.c
+@@ -787,8 +787,10 @@
+ task_wait_to_return(void)
+ {
+ 	task_t task = current_task();
+ 
++	extern void sweet_early_pstore_string(const char *);
++	sweet_early_pstore_string("SWEET EXECP: C0 child task_wait_to_return enter\n");
+ 	is_write_lock(task->itk_space);
+ 
+ 	if (task->t_returnwaitflags & TRW_LRETURNWAIT) {
+ 		struct turnstile *turnstile = turnstile_prepare_hash((uintptr_t) task_get_return_wait_event(task),
+--- a/osfmk/kern/task.c
++++ b/osfmk/kern/task.c
+@@ -830,8 +830,9 @@
+ 	mach_kauth_cred_thread_update();
+ 	mac_proc_notify_exec_complete(current_proc());
+ #endif
+ 
++	sweet_early_pstore_string("SWEET EXECP: C1 child before thread_bootstrap_return\n");
+ 	thread_bootstrap_return();
+ }
+ 
+ boolean_t
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -809,8 +809,15 @@
+ 	}
+ #endif /* MACH_BSD */
+ #endif /* DEVELOPMENT || DEBUG */
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	{
++		extern void sweet_exc_log(int pid, int exc, uint64_t c0, uint64_t c1);
++		sweet_exc_log(proc_pid(get_bsdtask_info(task)), (int)exception,
++		    (uint64_t)code[0], codeCnt > 1 ? (uint64_t)code[1] : 0);
++	}
++#endif
+ #if __has_feature(ptrauth_calls)
+ 	if (exception & EXC_PTRAUTH_BIT) {
+ 		exception &= ~EXC_PTRAUTH_BIT;
+ 		assert(codeCnt == 2);
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -834,8 +834,27 @@
+  */
+ void sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subcode);
+ static void sweet_crash_strings(const char *name);
+ 
++/* 0132: every Mach exception raised by a user task with pid > 3. */
++void sweet_exc_log(int pid, int exc, uint64_t c0, uint64_t c1);
++
++void
++sweet_exc_log(int pid, int exc, uint64_t c0, uint64_t c1)
++{
++	if (pid <= 3) {
++		return;
++	}
++	arm_saved_state_t *ss = find_user_regs(current_thread());
++	printf("SWEET EXC: pid=%d exc=%d code0=0x%llx code1=0x%llx\n", pid, exc, c0, c1);
++	if (ss != NULL && is_saved_state64(ss)) {
++		printf("SWEET EXC: pid=%d pc=0x%llx lr=0x%llx sp=0x%llx far=0x%llx esr=0x%x\n",
++		    pid, get_saved_state_pc(ss), get_saved_state_lr(ss),
++		    get_saved_state_sp(ss), (uint64_t)saved_state64(ss)->far,
++		    (unsigned int)saved_state64(ss)->esr);
++	}
++}
++
+ void
+ sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subcode)
+ {
+ 	thread_t thread = current_thread();
+--- a/bsd/kern/kern_sig.c
++++ b/bsd/kern/kern_sig.c
+@@ -2051,8 +2051,15 @@
+ 
+ 	mask = sigmask(signum);
+ 	prop = sigprop[signum];
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	if (p != PROC_NULL && proc_getpid(p) > 3) {
++		printf("SWEET SIG: pid=%d name=%s sig=%d flavor=%d\n",
++		    proc_getpid(p), p->p_comm, signum, flavor);
++	}
++#endif
++
+ #if SIGNAL_DEBUG
+ 	if (rdebug_proc && (p != PROC_NULL) && (p == rdebug_proc)) {
+ 		ram_printf(3);
+ 	}
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -48,8 +48,10 @@
+ #include <IOKit/IOTimerEventSource.h>
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ extern "C" void sweet_early_display_commit(void);
+ extern "C" void sweet_log_draw_fb(volatile uint32_t *, unsigned int, unsigned int, unsigned int);
++extern "C" void sweet_log_set_fb(volatile uint32_t *, unsigned int, unsigned int, unsigned int);
++extern "C" void sweet_early_live_repaint(void);
+ #endif
+ #include <IOKit/system.h>
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -183,8 +183,13 @@
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+ 	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
++	if (fPixels != 0) {
++		/* 0132: from here on every console byte is drawn live into fPixels. */
++		sweet_log_set_fb((volatile uint32_t *)fPixels, fRowBytes / 4,
++		    fWidth / (8u * 2u), (fHeight - 32u) / (16u * 2u));
++	}
+ 	fWorkLoop = IOWorkLoop::workLoop();
+ 	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
+ 		IOLog("SWEET FB: setup failed\n");
+ 		OSSafeReleaseNULL(fSurface);    /* stays published: also held by the table */
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -405,10 +405,10 @@
+ 	}
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	/* 0125: command-mode DSI panel needs an explicit kick after each
+ 	 * blit into the continuous-splash framebuffer at 0x83401000. */
+-	sweet_log_draw_fb((volatile uint32_t *)fPixels, fRowBytes / 4,
+-	    fWidth / (8u * 2u), (fHeight - 32u) / (16u * 2u));
++	/* 0132: repaint the shadow text after a client blit, then kick the panel. */
++	sweet_early_live_repaint();
+ 	sweet_early_display_commit();
+ #endif
+ }
+ 
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -732,8 +732,27 @@
+ 	}
+ 	sweet_early_draw_console_to(tail, want, fb, stride_px, cols, rows);
+ }
+ 
++/* 0132: start the live on-screen console and replay recent ring bytes. */
++void sweet_log_set_fb(volatile uint32_t *fb, unsigned int stride_px,
++    unsigned int cols, unsigned int rows);
++
++void
++sweet_log_set_fb(volatile uint32_t *fb, unsigned int stride_px,
++    unsigned int cols, unsigned int rows)
++{
++	extern void sweet_early_live_set(volatile uint32_t *, unsigned int, unsigned int, unsigned int);
++	extern void sweet_early_live_putc(char);
++	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
++	uint64_t want = MIN(total, (uint64_t)(cols * rows * 2u));
++
++	sweet_early_live_set(fb, stride_px, cols, rows);
++	for (uint64_t i = total - want; i < total; i++) {
++		sweet_early_live_putc(sweet_log_ring[i % SWEET_LOG_SIZE]);
++	}
++}
++
+ uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
+ 
+ uint32_t
+ sweet_log_copy(uint64_t *pos, char *out, uint32_t max)
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -183,8 +183,12 @@
+ 	/* 0122: pstore write is unconditional — never swallowed by
+ 	 * early_disabled.  The glyph renderer has its own guards. */
+ 	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
+ 	sweet_early_fb_putc(c);
++	{
++		extern void sweet_early_live_putc(char);
++		sweet_early_live_putc(c);
++	}
+ }
+ 
+ void
+ sweet_early_fb_putc(char c)
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -133,10 +133,13 @@
+ 
+ void
+ sweet_early_pstore_string(const char *s)
+ {
++	extern void sweet_early_live_putc(char);
+ 	while (*s) {
+-		sweet_early_pstore_putc(*s++);
++		char ch = *s++;
++		sweet_early_pstore_putc(ch);
++		sweet_early_live_putc(ch);	/* 0132: markers show on the panel too */
+ 	}
+ }
+ #define EARLY_WIDTH 1080u
+ #define EARLY_HEIGHT 1920u
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -267,8 +267,117 @@
+ 		col++;
+ 	}
+ }
+ 
++/*
++ * 0132: incremental live console on the surface AppleCLCD presents (fPixels).
++ * Every console byte and every pstore marker is drawn as it is logged into a
++ * ring of text rows; a shadow buffer lets present() repaint after a client
++ * blit, and each newline kicks the command-mode panel.  A contended byte is
++ * dropped rather than spun on (interrupt context can re-enter).
++ */
++#define LIVE_MAX_ROWS 64u
++#define LIVE_MAX_COLS 80u
++static volatile uint32_t *live_fb;
++static unsigned int live_stride, live_cols, live_rows, live_row, live_col;
++static char live_text[LIVE_MAX_ROWS][LIVE_MAX_COLS];
++static volatile uint32_t live_lock;
++
++static void
++live_draw_cell(unsigned int row, unsigned int col, unsigned char c)
++{
++	const unsigned char *glyph = iso_font + c * 16;
++	for (unsigned int gy = 0; gy < 16; gy++) {
++		for (unsigned int sy = 0; sy < EARLY_SCALE; sy++) {
++			volatile uint32_t *line = live_fb +
++			    (row * EARLY_CELL_H + gy * EARLY_SCALE + sy) * live_stride +
++			    col * EARLY_CELL_W;
++			for (unsigned int gx = 0; gx < 8; gx++) {
++				uint32_t pixel = (glyph[gy] & (1u << gx)) ? 0xffffffffu : 0xff000000u;
++				for (unsigned int sx = 0; sx < EARLY_SCALE; sx++) {
++					line[gx * EARLY_SCALE + sx] = pixel;
++				}
++			}
++		}
++	}
++}
++
++static void
++live_clear_row(unsigned int row)
++{
++	for (unsigned int col = 0; col < LIVE_MAX_COLS; col++) {
++		live_text[row][col] = ' ';
++	}
++	for (unsigned int col = 0; col < live_cols; col++) {
++		live_draw_cell(row, col, ' ');
++	}
++}
++
++void
++sweet_early_live_set(volatile uint32_t *fb, unsigned int stride_px,
++    unsigned int cols, unsigned int rows)
++{
++	if (fb == NULL || cols == 0 || rows == 0) {
++		return;
++	}
++	while (__sync_lock_test_and_set(&live_lock, 1)) {
++	}
++	live_fb = NULL;
++	live_stride = stride_px;
++	live_cols = cols > LIVE_MAX_COLS ? LIVE_MAX_COLS : cols;
++	live_rows = rows > LIVE_MAX_ROWS ? LIVE_MAX_ROWS : rows;
++	live_row = 0;
++	live_col = 0;
++	live_fb = fb;
++	for (unsigned int r = 0; r < live_rows; r++) {
++		live_clear_row(r);
++	}
++	__sync_lock_release(&live_lock);
++	sweet_early_display_commit();
++}
++
++void
++sweet_early_live_putc(char c)
++{
++	if (live_fb == NULL) {
++		return;
++	}
++	if (__sync_lock_test_and_set(&live_lock, 1)) {
++		return;
++	}
++	if (c != '\r') {
++		if (c == '\n' || live_col >= live_cols) {
++			live_col = 0;
++			live_row = (live_row + 1) % live_rows;
++			live_clear_row(live_row);
++			sweet_early_display_commit();
++		}
++		if (c == '\t') {
++			c = ' ';
++		}
++		if (c != '\n' && (unsigned char)c >= 32 && (unsigned char)c < 127) {
++			live_text[live_row][live_col] = c;
++			live_draw_cell(live_row, live_col, (unsigned char)c);
++			live_col++;
++		}
++	}
++	__sync_lock_release(&live_lock);
++}
++
++void
++sweet_early_live_repaint(void)
++{
++	if (live_fb == NULL || __sync_lock_test_and_set(&live_lock, 1)) {
++		return;
++	}
++	for (unsigned int r = 0; r < live_rows; r++) {
++		for (unsigned int col = 0; col < live_cols; col++) {
++			live_draw_cell(r, col, (unsigned char)live_text[r][col]);
++		}
++	}
++	__sync_lock_release(&live_lock);
++}
++
+ void
+ sweet_early_draw_console_tail(const char *buf, unsigned int len)
+ {
+ 	if (early_disabled || early_fb_off) {
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -22,8 +22,12 @@
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_set_pstore(uint64_t base);
+ void sweet_early_display_init(void);
+ void sweet_early_display_commit(void);
++void sweet_early_live_set(volatile uint32_t *fb, unsigned int stride_px,
++    unsigned int cols, unsigned int rows);
++void sweet_early_live_putc(char c);
++void sweet_early_live_repaint(void);
+ #define SWEET_EARLY_FB_BASE 0x83401000ULL
+ void sweet_early_disable(void);
+ #else
+ static inline void sweet_early_mark(unsigned int stage, const char *label)
