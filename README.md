@@ -10,16 +10,26 @@ userland target.
 > security model is mostly switched off. The root image is written into the `userdata`
 > partition, so **it erases Android's user data**.
 
-## Status (2026-11-23) — iOS userland reached
+## Status (2026-11-23) — iOS userland reached; `seputil` stall isolated
 
-The shim boots the XNU kernel on the Xperia XZ, the HFSX root mounts from eMMC, and Apple's
-**iOS 16.7.16 `launchd` runs its boot tasks**. The latest boot log
-(`D:\\xz\\shimlogs\\xnu-0125-fulltrace-20261123.txt`, 18,932 B) shows:
-`Darwin Bootstrapper Version 7.0.0`, root remounted read-write
-(`/dev/kaguraemmc0 on / (hfs, local, journaled, noatime)`), `lo0` up, libignition attempting
-preboot, `mount-phase-1` and `data-protection` boot tasks running, and `exec seputil` — with no
-panic. `SWEET FB: AppleCLCD 1080x1920 ... presented as 1125x2436` confirms the built-in
-IOMobileFramebuffer is presenting into the panel framebuffer.
+The shim boots XNU on the Xperia XZ, the HFSX root mounts from eMMC, and Apple's **iOS 16.7.16
+`launchd` runs its boot tasks**: root remounted RW, `lo0` up, `mount-phase-1` done, and
+`data-protection` → `exec seputil`. The current payload is **0126** (`CI 45232214211`), which adds
+`SWEET EXEC:` / `SWEET EXIT:` telemetry written straight into pstore. Log
+`D:\\xz\\shimlogs\\xnu-0126-fulltrace-20261123.txt` (19,070 B) shows `launchd` exec,
+`mount_hfs` exec + exit `0x0`, `mount` exit `0x0`, then `exec seputil` with no seputil exec/exit.
+`SWEET FB: AppleCLCD 1080x1920 ... presented as 1125x2436` confirms IOMobileFramebuffer is
+presenting. A RAM-only long-watchdog boot (180 s CPU3 / 205 s HW) produced a byte-identical log at
+the stall, so this is a **genuine hang, not a watchdog cutoff**.
+
+Disassembly of `/usr/libexec/seputil` (the `init_data_protection` symlink launched by launchd with
+argc=1) shows it calls `IORegistryEntryFromPath("IODeviceTree:/arm-io/sep")` and, when that node is
+absent, prints `No SEP present on this device` and exits 0. Our ADT has no `/arm-io/sep`; the hang
+is at the registry `RLOCK` (`lck_rw_lock_shared(&gIORegistryLock)`) in `IORegistryEntry::fromPath`.
+No `AppleSEPManager` stub is needed — seputil never calls `IOServiceMatching` in this path.
+**0127** (`3eadd6c`, CI 45247763407) adds a no-SEP fast-path in `is_io_registry_entry_from_path`
+plus `SWEET SEP:` before/after-RLOCK IOLogs (`strstr` is unavailable in the kernel; `strncmp` is
+used). Awaiting verification and a p54 payload write.
 
 | Area | State |
 | --- | --- |
@@ -28,7 +38,7 @@ IOMobileFramebuffer is presenting into the panel framebuffer.
 | XNU early boot | Full `bsd_init()` completes; global `ml_set_max_cpus(1)` avoids the single-CPU wait wedge |
 | eMMC / storage | `kagura_emmc.c` (0085) reads GPT + CMD17/CMD24; `/dev/kaguraemmc0` is the root device |
 | Root filesystem | HFSX image at p54 LBA 0, SWEETXNU payload at LBA 46,563,000; XNU remounts `/` RW |
-| Userland | **`launchd` running boot tasks** (mount-phase-1, data-protection, seputil); next: backboardd/SpringBoard |
+| Userland | **`launchd` running boot tasks**; blocked in `data-protection` at `seputil` → registry RLOCK |
 | Display | Shim MDP5 + live FB glyphs; `sweet_early_display_commit()` (CTL0_FLUSH/START) fires on every `AppleCLCD::present()` |
 
 Boot args required: `rd=kaguraemmc0 emmcroot=userdata rootrw=1 emmcrw=1
