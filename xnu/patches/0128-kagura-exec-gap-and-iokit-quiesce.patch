@@ -1,0 +1,119 @@
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -188,9 +188,18 @@
+ 		panic("Failed to start IOService matching");
+ 	}
+ 
+ #if !NO_KEXTD
++	/*
++	 * Kagura: iOS has no IOKit daemon (kernelmanagerd). Without this guard the
++	 * busy count below is never released and IOKit never quiesces (idea from
++	 * ios-sailfish 0166 / ios-topaz).
++	 */
++#if !defined(ARM64_BOARD_CONFIG_SWEET)
+ 	if (OSKext::iokitDaemonAvailable()) {
++#else
++	if (false) {
++#endif
+ 		/* Add a busy count to keep the registry busy until the IOKit daemon has
+ 		 * completely finished launching. This is decremented when the IOKit daemon
+ 		 * messages the kernel after the in-kernel linker has been
+ 		 * removed and personalities have been sent.
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -1199,9 +1199,11 @@
+ 		panic(kIOKitDaemonName " is unavailable in this environment, but it was launched");
+ 	}
+ 	IOServiceTrace(IOSERVICE_KEXTD_READY, 0, 0, 0, 0);
+ 	startDeferredMatches();
++#if !defined(ARM64_BOARD_CONFIG_SWEET)                  /* no hold taken (IOStartIOKit.cpp) */
+ 	getServiceRoot()->adjustBusy(-1);
++#endif
+ 	IOService::publishUserResource(gIOResourceIOKitKey);
+ #endif /* !NO_KEXTD */
+ }
+ 
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5050,8 +5050,9 @@
+ 		ipc_task_enable(new_task);
+ 
+ 		exec_resettextvp(p, imgp);
+ 		error = process_signature(p, imgp);
++		sweet_early_pstore_string("SWEET EXECP: 1 after process_signature\n");
+ 	}
+ 
+ #if defined(HAS_APPLE_PAC)
+ 	if (imgp->ip_new_thread && !error) {
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5096,8 +5096,9 @@
+ 		 * exec_activate_image because task_bank_init checks entitlements that
+ 		 * aren't loaded until subsequent calls (including exec_resettextvp).
+ 		 */
+ 		error = proc_transstart(p, 0, 0);
++		sweet_early_pstore_string("SWEET EXECP: 2 after proc_transstart\n");
+ 	}
+ 
+ 	if (!error) {
+ 		task_bank_init(new_task);
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5101,8 +5101,9 @@
+ 
+ 	if (!error) {
+ 		task_bank_init(new_task);
+ 		proc_transend(p, 0);
++		sweet_early_pstore_string("SWEET EXECP: 3 after task_bank_init\n");
+ 
+ 		// Don't inherit crash behavior across exec
+ 		p->p_crash_behavior = 0;
+ 		p->p_crash_behavior_deadline = 0;
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5114,8 +5114,9 @@
+ #if XNU_TARGET_OS_OSX
+ 		if (IOTaskHasEntitlement(new_task, SINGLE_JIT_ENTITLEMENT)) {
+ 			vm_map_single_jit(get_task_map(new_task));
+ 		}
++		sweet_early_pstore_string("SWEET EXECP: 4 after IOTaskHasEntitlement\n");
+ #endif /* XNU_TARGET_OS_OSX */
+ 
+ 		/* Sever any extant thread affinity */
+ 		thread_affinity_exec(current_thread());
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5139,8 +5139,9 @@
+ 		arcade_prepare(new_task, imgp->ip_new_thread);
+ #endif /* CONFIG_ARCADE */
+ 
+ 		proc_apply_jit_and_vm_policies(imgp, p, new_task);
++		sweet_early_pstore_string("SWEET EXECP: 5 after apply_jit_vm\n");
+ 
+ 		if (vm_darkwake_mode == TRUE) {
+ 			/*
+ 			 * This process is being launched when the system
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7424,8 +7424,9 @@
+ 			}
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 			/* SWEET runs every iOS binary this way: one short line per exec. */
+ 			printf("exec %s\n", p->p_name);
++			sweet_early_pstore_string("SWEET EXECP: 0 in process_signature\n");
+ #else
+ 			printf("Allowing spawn of iOS binary %s since it has "
+ 			    "com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch "
+ 			    "boot-arg set to true\n", p->p_name);
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7473,8 +7473,9 @@
+ 	 * event of mig failure (e.g. process was signalled during the
+ 	 * rpc call, taskgated died, mig server died etc.).
+ 	 */
+ 
++	sweet_early_pstore_string("SWEET EXECP: 0b before taskgated upcall\n");
+ 	kr = __EXEC_WAITING_ON_TASKGATED_CODE_SIGNATURE_UPCALL__(port, proc_getpid(p));
+ 	switch (kr) {
+ 	case KERN_SUCCESS:
+ 		error = 0;
