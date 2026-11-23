@@ -1,0 +1,170 @@
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -8,8 +8,9 @@
+ 
+ #if defined(SWEET)
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
++void sweet_early_fb_putc(char c);
+ void sweet_early_pstore_putc(char c);
+ void sweet_early_note_ttbr0_off(void);
+ void sweet_early_enable_tee(void);
+ int sweet_early_tee_active(void);
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -171,17 +171,20 @@
+ 
+ void
+ sweet_early_putc(char c)
+ {
+-	/* 0117: pstore uses the TTBR1 high alias after marker 47/66, so keep
+-	 * writing it even when TTBR0 is gone; only FB drawing must stop. */
+-	if (early_disabled) {
+-		return;
+-	}
++	/* 0122: pstore write is unconditional — never swallowed by
++	 * early_disabled.  The glyph renderer has its own guards. */
+ 	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
+-	/* 0121: FB now uses the TTBR1 high alias, so keep glyphs flowing even
+-	 * after the bootstrap TTBR0 is gone (IOWatchdog et al. remain visible). */
+-	if (early_fb_off) {
++	sweet_early_fb_putc(c);
++}
++
++void
++sweet_early_fb_putc(char c)
++{
++	/* 0122: glyph-only path.  FB uses the TTBR1 high alias (0121), so
++	 * glyphs keep flowing after TTBR0 is gone (IOWatchdog et al.). */
++	if (early_disabled || early_fb_off) {
+ 		return;
+ 	}
+ 	if (!early_started) {
+ 		early_started = 1;
+--- a/osfmk/kern/printf.c
++++ b/osfmk/kern/printf.c
+@@ -850,10 +850,12 @@
+ 	if (!disableConsoleOutput) {
+ 		console_write_char(c);
+ 	}
+ #if defined(SWEET)
+-	/* 0121: BSD printf()/IOLog() through glyphs + newline frame commit. */
+-	sweet_early_putc(c);
++	/* 0122: explicit pstore tee — every IOLog()/BSD printf() after marker
++	 * 98 must land in ramoops; glyphs + newline commit stay on the LCD. */
++	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
++	sweet_early_fb_putc(c);
+ #endif
+ 
+ #ifdef MACH_BSD
+ 	if (!kernel_debugger_entry_count) {
+--- a/pexpert/arm/pe_kprintf.c
++++ b/pexpert/arm/pe_kprintf.c
+@@ -27,11 +27,12 @@
+ {
+ 	if (sweet_normal_kputc) {
+ 		sweet_normal_kputc(c);
+ 	}
+-	/* 0121: route through the same glyph renderer + newline CTL0_START
+-	 * commit used by sweet_early_mark(), so kernel text keeps scrolling. */
+-	sweet_early_putc(c);
++	/* 0122: explicit pstore tee + glyph renderer + newline CTL0_START
++	 * commit, so all kprintf text is in ramoops and keeps scrolling. */
++	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
++	sweet_early_fb_putc(c);
+ }
+ #endif
+ 
+ // disable_serial_output disables kprintf() *and* unbuffered panic output.
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -729,10 +729,12 @@
+ 	mcache_init();
+ 	sweet_early_mark(98, "bsd_init: after mcache_init");
+ 
+ 	/* Initialize mbuf's. */
++	sweet_early_mark(104, "bsd_init: before mbinit");
+ 	bsd_init_kprintf("calling mbinit\n");
+ 	mbinit();
++	sweet_early_mark(105, "bsd_init: after mbinit");
+ 	sweet_early_mark(85, "bsd_init: after mbinit");
+ 	restricted_in_port_init();
+ #endif /* SOCKETS */
+ 
+@@ -768,8 +770,9 @@
+ 	 * Initialize protocols.  Block reception of incoming packets
+ 	 * until everything is ready.
+ 	 */
+ #if NETWORKING
++	sweet_early_mark(106, "bsd_init: before network init (nwk_wq_init)");
+ 	bsd_init_kprintf("calling nwk_wq_init\n");
+ 	nwk_wq_init();
+ 	bsd_init_kprintf("calling dlil_init\n");
+ 	dlil_init();
+@@ -813,11 +816,13 @@
+ 
+ 	bsd_init_kprintf("calling sysctl_mib_init\n");
+ 	sysctl_mib_init();
+ 
++	sweet_early_mark(108, "bsd_init: before bsd_autoconf (kminit)");
+ 	sweet_early_mark(86, "bsd_init: before bsd_autoconf (kminit)");
+ 	bsd_init_kprintf("calling bsd_autoconf\n");
+ 	bsd_autoconf();
++	sweet_early_mark(109, "bsd_init: after bsd_autoconf (IOKitBSDInit)");
+ 	sweet_early_mark(87, "bsd_init: after bsd_autoconf (IOKitBSDInit)");
+ 
+ #if CONFIG_DTRACE
+ 	dtrace_postinit();
+@@ -881,8 +886,9 @@
+ 	 * the clients that are waiting for the networking stack to be usable.
+ 	 */
+ 	bsd_init_kprintf("calling net_init_run\n");
+ 	net_init_run();
++	sweet_early_mark(107, "bsd_init: after net_init_run");
+ #endif /* NETWORKING */
+ 
+ 	bsd_init_kprintf("calling inittodr\n");
+ 	inittodr(0);
+@@ -1016,10 +1022,12 @@
+ #if DEVFS
+ 	{
+ 		char mounthere[] = "/dev"; /* !const because of internal casting */
+ 
++		sweet_early_mark(110, "bsd_init: before devfs_kernel_mount");
+ 		bsd_init_kprintf("calling devfs_kernel_mount\n");
+ 		devfs_kernel_mount(mounthere);
++		sweet_early_mark(111, "bsd_init: after devfs_kernel_mount");
+ 	}
+ #endif /* DEVFS */
+ 
+ #if CONFIG_BASESYSTEMROOT
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -899,12 +899,14 @@
+ 			astring->release();
+ 		}
+ 	}
+ 
++	sweet_early_mark(112, "IOKitBSDInit: before waitQuiet(matching)");
+ 	if (gIOKitDebug & kIOWaitQuietBeforeRoot) {
+ 		IOLog( "Waiting for matching to complete\n" );
+ 		IOService::getPlatform()->waitQuiet();
+ 	}
++	sweet_early_mark(113, "IOKitBSDInit: after waitQuiet(matching)");
+ 
+ 	if (matching) {
+ 		OSSerialize * s = OSSerialize::withCapacity( 5 );
+ 
+@@ -1014,10 +1016,12 @@
+ iofrootx:
+ 
+ 	IOService::setRootMedia(service);
+ 
++	sweet_early_mark(114, "IOKitBSDRoot: before waitQuiet(dtree)");
+ 	if ((gIOKitDebug & (kIOLogDTree | kIOLogServiceTree | kIOLogMemory)) && !debugInfoPrintedOnce) {
+ 		IOService::getPlatform()->waitQuiet();
++		sweet_early_mark(115, "IOKitBSDRoot: after waitQuiet(dtree)");
+ 		if (gIOKitDebug & kIOLogDTree) {
+ 			IOLog("\nDT plane:\n");
+ 			IOPrintPlane( gIODTPlane );
+ 		}
