@@ -1,0 +1,39 @@
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -3357,8 +3357,22 @@
+ 
+ 	if (main_port != main_device_port) {
+ 		return kIOReturnNotPrivileged;
+ 	}
++
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* Kagura (MSM8996) has no Secure Enclave and no /arm-io/sep node.
++	 * seputil's init_data_protection path calls IORegistryEntryFromPath
++	 * on that path and exits 0 when the answer is "none".  Answer here,
++	 * before IORegistryEntry::fromPath takes the registry RLOCK, so a
++	 * wedged registry lock cannot stall the data-protection boot task. */
++	IOLog("SWEET SEP: registry path request %.100s\n", path);
++	if (strncmp(path, "IODeviceTree:/arm-io/sep", 24) == 0) {
++		IOLog("SWEET SEP: forcing no-SEP answer\n");
++		*registry_entry = 0;
++		return kIOReturnSuccess;
++	}
++#endif
+ 
+ 	entry = IORegistryEntry::fromPath( path );
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	{
+--- a/iokit/Kernel/IORegistryEntry.cpp
++++ b/iokit/Kernel/IORegistryEntry.cpp
+@@ -1609,9 +1609,11 @@
+ 			len = 0;
+ 		}
+ 	}
+ 
++	IOLog("SWEET SEP: fromPath before RLOCK %.100s\n", path ? path : "(null)");
+ 	RLOCK;
++	IOLog("SWEET SEP: fromPath after RLOCK %.100s\n", path ? path : "(null)");
+ 
+ 	do {
+ 		if (NULL == where) {
+ 			if ((NULL == fromEntry) && (*path++ == '/')) {
