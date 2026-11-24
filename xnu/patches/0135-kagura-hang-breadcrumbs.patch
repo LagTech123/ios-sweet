@@ -1,0 +1,91 @@
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1047,9 +1047,14 @@
+ 		if (ss == NULL || !is_saved_state64(ss)) {
+ 			continue;
+ 		}
+ 		fp = get_saved_state_fp(ss);
+-		n = snprintf(line, sizeof(line), "SMP %s t%d pc 0x%llx lr 0x%llx sp 0x%llx bt", name, tn++,
++		n = snprintf(line, sizeof(line),
++		    "SMP %s t%d st 0x%x we 0x%llx pri %d far 0x%llx esr 0x%x x0 0x%llx x20 0x%llx pc 0x%llx lr 0x%llx sp 0x%llx bt",
++		    name, tn++, (unsigned int)thread->state, (uint64_t)thread->wait_event,
++		    (int)thread->sched_pri, (uint64_t)saved_state64(ss)->far,
++		    (unsigned int)saved_state64(ss)->esr, (uint64_t)saved_state64(ss)->x[0],
++		    (uint64_t)saved_state64(ss)->x[20],
+ 		    get_saved_state_pc(ss), get_saved_state_lr(ss), get_saved_state_sp(ss));
+ 		for (int i = 0; i < 16 && fp != 0 && (fp & 7) == 0 && n < (int)sizeof(line) - 20; i++) {
+ 			uint64_t frame[2];
+ 			if (vm_map_read_user(map, fp, frame, sizeof(frame)) != KERN_SUCCESS) {
+--- a/bsd/dev/kagura_emmc.c
++++ b/bsd/dev/kagura_emmc.c
+@@ -76,8 +76,22 @@
+ #define KEMMC_TIMEOUT           40000000u
+ 
+ static vm_offset_t kemmc_regs;
+ static uint64_t kemmc_first_lba, kemmc_nsectors;
++
++/* 0135: breadcrumbs for hang hunting (read by the sampler and the poll loops). */
++static volatile uint32_t kemmc_dbg_lba, kemmc_dbg_nreq, kemmc_dbg_nsec, kemmc_dbg_cnt;
++static volatile uint64_t kemmc_dbg_off;
++
++void kagura_emmc_dbg(void);
++
++void
++kagura_emmc_dbg(void)
++{
++	printf("KAGURA eMMC: dbg nreq=%u nsec=%u lastlba=%u lastcnt=%u lastoff=0x%llx\n",
++	    kemmc_dbg_nreq, kemmc_dbg_nsec, kemmc_dbg_lba, kemmc_dbg_cnt,
++	    (uint64_t)kemmc_dbg_off);
++}
+ static char kemmc_partition_name[16] = "userdata";
+ static uint32_t kemmc_secsize = KEMMC_SECTOR;
+ static uint8_t kemmc_bounce[KEMMC_SECTOR];
+ static dev_t kemmc_bdev;
+--- a/bsd/dev/kagura_emmc.c
++++ b/bsd/dev/kagura_emmc.c
+@@ -163,10 +163,16 @@
+ 	emmc_wr8(SDHCI_TRANSFER_MODE, (uint8_t)(TRNS_READ | TRNS_BLK_CNT_EN));
+ 	emmc_wr16(SDHCI_COMMAND, (uint16_t)((17u << 8) | CMD_RESP_SHORT |
+ 	    CMD_CRC | CMD_INDEX | CMD_DATA));
+ 
++	kemmc_dbg_lba = lba;
++	kemmc_dbg_nsec++;
+ 	for (unsigned i = 0; i < KEMMC_TIMEOUT; i++) {
+ 		status = emmc_rd32(SDHCI_INT_STATUS);
++		if ((i & 0x1fffffu) == 0x1fffffu) {
++			printf("KAGURA eMMC: waiting lba=%u i=%u int=%x state=%x words=%u nreq=%u\n",
++			    lba, i, status, emmc_rd32(SDHCI_PRESENT_STATE), words, kemmc_dbg_nreq);
++		}
+ 		if (status & INT_ERROR_MASK) {
+ 			printf("KAGURA eMMC: CMD17 error lba=%u int=%x state=%x adma=%x\n",
+ 			    lba, status, emmc_rd32(SDHCI_PRESENT_STATE),
+ 			    emmc_rd32(SDHCI_ADMA_ERROR));
+--- a/bsd/dev/kagura_emmc.c
++++ b/bsd/dev/kagura_emmc.c
+@@ -468,8 +468,11 @@
+ 		error = EIO;
+ 		goto done;
+ 	}
+ 
++	kemmc_dbg_nreq++;
++	kemmc_dbg_cnt = count;
++	kemmc_dbg_off = off;
+ 	lck_mtx_lock(&kemmc_lock);
+ 	for (uint32_t n = 0; n < count;) {
+ 		uint64_t pos = off + n;
+ 		uint32_t skip = (uint32_t)(pos & (KEMMC_SECTOR - 1));
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -82,8 +82,12 @@
+ 	}
+ 	(void)tsleep(&chan, PZERO, "sweetsmp", first * hz);
+ 	for (int i = 0; i < 40; i++) {
+ 		printf("SMP --- sample %d\n", i);
++		{
++			extern void kagura_emmc_dbg(void);
++			kagura_emmc_dbg();
++		}
+ 		proc_iterate(PROC_ALLPROCLIST, sweet_sample_proc, NULL, NULL, NULL);
+ 		(void)tsleep(&chan, PZERO, "sweetsmp", every * hz);
+ 	}
+ }
