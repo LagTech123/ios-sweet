@@ -15,10 +15,6 @@ The attempted CMD18/CMD23 speed-up failed: **CMD23 breaks the HFS+ mount** (EIO)
 without CMD23 times out in the transfer loop (`KAGURA eMMC: CMD18 timeout s=23/32`). The working
 configuration remains CMD17 (`emmcmulti=0`). Backboardd and SpringBoard have not been reached.
 
-**Full history, exact device state, DO/DON'T and next steps: [`status.md`](status.md).**
-Windows-side authoritative handoff: `D:\xz\XPERIA-PORT-HANDOFF.md` (mirrored in
-`status_block.md` and `HANDOFF.md`); one-page cheat sheet: `D:\xz\QUICK-REFERENCE-20261124.md`.
-
 | Area | State |
 | --- | --- |
 | Boot chain | Sony ABL → shim (`SWEETXNU` payload loader) → XNU at EL1; **p30 must be the stock root-layout shim** |
