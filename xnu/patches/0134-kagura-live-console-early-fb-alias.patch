@@ -1,0 +1,69 @@
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -292,12 +292,15 @@
+ static void
+ live_draw_cell(unsigned int row, unsigned int col, unsigned char c)
+ {
+ 	const unsigned char *glyph = iso_font + c * 16;
++	/* 0134: write through the early FB alias, the mapping that is known to
++	 * reach the panel.  fPixels (a cacheable kernel mapping) never showed. */
++	(void)live_stride;
+ 	for (unsigned int gy = 0; gy < 16; gy++) {
+ 		for (unsigned int sy = 0; sy < EARLY_SCALE; sy++) {
+-			volatile uint32_t *line = live_fb +
+-			    (row * EARLY_CELL_H + gy * EARLY_SCALE + sy) * live_stride +
++			volatile uint32_t *line = EARLY_FB +
++			    (row * EARLY_CELL_H + gy * EARLY_SCALE + sy) * EARLY_STRIDE +
+ 			    col * EARLY_CELL_W;
+ 			for (unsigned int gx = 0; gx < 8; gx++) {
+ 				uint32_t pixel = (glyph[gy] & (1u << gx)) ? 0xffffffffu : 0xff000000u;
+ 				for (unsigned int sx = 0; sx < EARLY_SCALE; sx++) {
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -369,8 +369,14 @@
+ 	}
+ 	__sync_lock_release(&live_lock);
+ }
+ 
++int
++sweet_early_live_active(void)
++{
++	return live_fb != NULL;
++}
++
+ void
+ sweet_early_live_repaint(void)
+ {
+ 	if (live_fb == NULL || __sync_lock_test_and_set(&live_lock, 1)) {
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -185,11 +185,16 @@
+ {
+ 	/* 0122: pstore write is unconditional — never swallowed by
+ 	 * early_disabled.  The glyph renderer has its own guards. */
+ 	sweet_early_pstore_putc(c == '\r' ? '\n' : c);
+-	sweet_early_fb_putc(c);
+ 	{
+ 		extern void sweet_early_live_putc(char);
++		extern int sweet_early_live_active(void);
++		/* 0134: once the live console owns the screen the early renderer
++		 * stays quiet so the two never draw over each other. */
++		if (!sweet_early_live_active()) {
++			sweet_early_fb_putc(c);
++		}
+ 		sweet_early_live_putc(c);
+ 	}
+ }
+ 
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -26,8 +26,9 @@
+ void sweet_early_live_set(volatile uint32_t *fb, unsigned int stride_px,
+     unsigned int cols, unsigned int rows);
+ void sweet_early_live_putc(char c);
+ void sweet_early_live_repaint(void);
++int sweet_early_live_active(void);
+ #define SWEET_EARLY_FB_BASE 0x83401000ULL
+ void sweet_early_disable(void);
+ #else
+ static inline void sweet_early_mark(unsigned int stage, const char *label)
