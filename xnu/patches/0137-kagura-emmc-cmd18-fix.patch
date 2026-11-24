@@ -1,0 +1,116 @@
+--- a/bsd/dev/kagura_emmc.c
++++ b/bsd/dev/kagura_emmc.c
+@@ -98,6 +98,11 @@
+ static uint8_t kemmc_multi_bounce[KEMMC_MULTI_MAX * KEMMC_SECTOR];
+ static int kemmc_use_multi = -1;
+ static int kemmc_do_cmd23 = 1;
++/* 0137: CMD18 buffer-read polling and single-sector fallback. */
++#define PRES_BUF_READ_ENABLE    0x00000800u
++#define SDHCI_BUF_READ_READY    0x00000020u
++#define RESET_CMD               0x02u
++#define RESET_DATA              0x04u
+ static uint8_t kemmc_bounce[KEMMC_SECTOR];
+ static dev_t kemmc_bdev;
+ static bool kemmc_ready;
+@@ -232,8 +237,9 @@
+ emmc_read_multi(uint32_t lba, uint32_t nsect, uint8_t *dst)
+ {
+ 	uint32_t enable, signal, status;
++	uint32_t pres;
+ 	unsigned words;
+-	int error;
++	int error = 0;
+ 
+ 	if (nsect == 0 || nsect > KEMMC_MULTI_MAX) {
+ 		return EINVAL;
+@@ -260,7 +266,7 @@
+ 				printf("KAGURA eMMC: CMD23 error int=%x state=%x\n",
+ 				    status, emmc_rd32(SDHCI_PRESENT_STATE));
+ 				error = EIO;
+-				goto done;
++				goto fallback;
+ 			}
+ 			if (status & INT_RESPONSE) {
+ 				break;
+@@ -286,38 +292,72 @@
+ 		words = 0;
+ 		for (unsigned i = 0; i < KEMMC_TIMEOUT; i++) {
+ 			status = emmc_rd32(SDHCI_INT_STATUS);
++			pres = emmc_rd32(SDHCI_PRESENT_STATE);
+ 			if (status & INT_ERROR_MASK) {
+ 				printf("KAGURA eMMC: CMD18 error s=%u/%u lba=%u int=%x state=%x\n",
+-				    s, nsect, lba, status, emmc_rd32(SDHCI_PRESENT_STATE));
++				    s, nsect, lba, status, pres);
+ 				error = EIO;
+-				goto done;
+-			}
+-			if (status & INT_DATA_AVAIL) {
++				goto fallback;
++			}
++			/* 0137: BUFFER_READ_ENABLE (PRESENT_STATE bit 11, level) or
++			 * BUFFER_READ_READY (INT_STATUS bit 5, latched). */
++			if ((pres & PRES_BUF_READ_ENABLE) ||
++			    (status & SDHCI_BUF_READ_READY)) {
++				/* 0137: clear the interrupt BEFORE draining the 128 words,
++				 * not after -- otherwise the next poll sees the same stale
++				 * event and misses the buffer-read window. */
++				emmc_wr32(SDHCI_INT_STATUS, INT_DATA_AVAIL);
+ 				for (unsigned j = 0; j < KEMMC_SECTOR / 4; j++) {
+ 					((uint32_t *)(dst + (size_t)s * KEMMC_SECTOR))[j] =
+ 					    emmc_rd32(SDHCI_BUFFER);
+ 				}
+ 				words = KEMMC_SECTOR / 4;
+-				emmc_wr32(SDHCI_INT_STATUS, INT_DATA_AVAIL);
+ 				break;
+ 			}
+ 		}
+ 		if (words == 0) {
+-			printf("KAGURA eMMC: CMD18 timeout s=%u/%u lba=%u int=%x\n",
+-			    s, nsect, lba, status);
++			printf("KAGURA eMMC: CMD18 timeout s=%u/%u lba=%u int=%x state=%x\n",
++			    s, nsect, lba, status, emmc_rd32(SDHCI_PRESENT_STATE));
+ 			error = ETIMEDOUT;
+-			goto done;
++			goto fallback;
+ 		}
+ 	}
+ 	for (unsigned i = 0; i < KEMMC_TIMEOUT; i++) {
+ 		status = emmc_rd32(SDHCI_INT_STATUS);
+ 		if (status & INT_ERROR_MASK) {
++			printf("KAGURA eMMC: CMD18 end error int=%x state=%x\n",
++			    status, emmc_rd32(SDHCI_PRESENT_STATE));
+ 			error = EIO;
+-			goto done;
++			goto fallback;
+ 		}
+ 		if (status & INT_DATA_END) {
+ 			break;
+ 		}
++		if (i == KEMMC_TIMEOUT - 1) {
++			printf("KAGURA eMMC: CMD18 end timeout int=%x state=%x\n",
++			    status, emmc_rd32(SDHCI_PRESENT_STATE));
++			error = ETIMEDOUT;
++			goto fallback;
++		}
++	}
++	goto done;      /* 0137: successful CMD18 must not fall into fallback */
++fallback:
++	/* 0137: a timed-out CMD18 leaves the CMD/DATA state dirty. Reset both
++	 * lines, then re-read the whole batch with the proven CMD17 path so a
++	 * CMD18 failure can never escape as ETIMEDOUT/EIO to the caller. */
++	printf("KAGURA eMMC: CMD18 fallback to CMD17 lba=%u nsect=%u err=%d\n",
++	    lba, nsect, error);
++	emmc_wr8(SDHCI_SOFTWARE_RESET, (uint8_t)(RESET_CMD | RESET_DATA));
++	for (unsigned i = 0; i < KEMMC_TIMEOUT; i++) {
++		if (!(emmc_rd8(SDHCI_SOFTWARE_RESET) & (RESET_CMD | RESET_DATA)))
++			break;
++	}
++	emmc_wr32(SDHCI_INT_STATUS, emmc_rd32(SDHCI_INT_STATUS));
++	error = 0;
++	for (uint32_t s = 0; s < nsect; s++) {
++		error = emmc_read_sector(lba + s, dst + (size_t)s * KEMMC_SECTOR);
++		if (error)
++			break;
+ 	}
+ done:
+ 	emmc_wr32(SDHCI_INT_STATUS, emmc_rd32(SDHCI_INT_STATUS));
