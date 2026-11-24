@@ -37,6 +37,8 @@ used). Awaiting verification and a p54 payload write.
 
 **0135 sampler changed the diagnosis:** seputil is runnable in a shared-cache page fault (`esr 0x92000007`) while the single-sector CMD17 eMMC driver delivers only ~1.8-3.6 MB/s, so dyld simply cannot finish inside the 40 s watchdog — seputil is slow, not wedged. 0136 (pushed, CI 45344986056) switches to CMD23+CMD18 multi-block reads with auto-CMD12 for ~10-20x throughput, with `emmcmulti=0` / `emmccmd23=0` boot-arg rollback. The `ignite() returned 25` preboot warning is normal and also present on the working sailfish port.
 
+**2026-11-24 device results:** 0136's CMD23 breaks HFS+ mount (EIO); always use `emmccmd23=0`. CMD18 without CMD23 mounts cleanly but is still unproven for launchd/seputil. Shim rebuilds are traps: only p30 = `xnu-flash-rootlayout-20261123.img` (MD5 `024ddd143649be14ef57803e39839cda`) reaches seputil; longwdt/wdt180 shims stop at `ignite() returned 25` with no sampler. Any shim rebuild needs `-DPAYLOAD_LBA_OFFSET=46563000ULL` (p54 LBA 46,563,000 = absolute 48,930,488); `build_root_layout.sh`'s 46563648 is wrong. `D:\xz\dump\p30-backup-20261124.img` is the longwdt image, NOT a good-shim backup. CMD17 baseline `xnu-0136-nomulti-rootlayout-20261124.txt` (28,235 B) reaches seputil/data-protection. Next: test the CMD18 payload on the correct shim. Full detail in `D:\xz\XPERIA-PORT-HANDOFF.md`.
+
 | Area | State |
 | --- | --- |
 | Boot chain | Sony ABL → shim (`SWEETXNU` payload loader) → XNU at EL1, MMU off |
