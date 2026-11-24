@@ -1,0 +1,208 @@
+--- a/iokit/Kernel/arm/SweetWatchdog.cpp
++++ b/iokit/Kernel/arm/SweetWatchdog.cpp
+@@ -22,8 +22,46 @@
+ #include <IOKit/IOKitKeys.h>
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOMemoryDescriptor.h>
+ #include <sys/proc.h>
++#include <arm/machine_routines.h>
++
++/* 0139: ml_io_map() is declared only for MACH_KERNEL_PRIVATE /
++ * PEXPERT_KERNEL_PRIVATE builds; IOKit is neither. The symbol is linked into
++ * the kernel by osfmk/arm64/sweet_early.c, so declare it here explicitly. */
++extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++/*
++ * 0139: disarm the kagura shim's watchdog from inside XNU. The good p30
++ * rootlayout shim arms two safety nets just before jumping here:
++ *   CPU3  : delay_ms(40000) -> if (!watchdog_cancelled) PSCI_SYSTEM_RESET
++ *   HW WDT: qcom,wdt@9830000 (0x09830000), bark 60 s / bite 63 s
++ * Only the shim's own dsi.c can set watchdog_cancelled, and that path never
++ * runs on the XNU boot. Ship sailfish's WDT_SECS=0 equivalent from userland:
++ *   physical 0x80098010 = 0x80080000 (shim load) + 0x18010 (BSS symbol
++ *                         watchdog_cancelled) -> 1 stops the CPU3 reset;
++ *   physical 0x09830008 = MSM_WDT + WDT_EN -> 0 disables the hardware timer.
++ * ml_io_map gives an uncached device mapping for both writes. Writing
++ * watchdog_armed would do nothing (CPU3 tests it only before the delay).
++ */
++static void
++sweet_wdt_disarm_shim(void)
++{
++	volatile uint32_t *flag = (volatile uint32_t *)
++	    ml_io_map(0x80098010UL, 0x1000);
++	volatile uint32_t *wdt = (volatile uint32_t *)
++	    ml_io_map(0x09830000UL, 0x1000);
++	if (flag != NULL) {
++		*flag = 1u;
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++	if (wdt != NULL) {
++		wdt[0x08 / 4] = 0u;             /* WDT_EN */
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++	IOLog("SWEET WDT: shim watchdog disarmed (flag %s, WDT_EN %s)\n",
++	    flag != NULL ? "ok" : "FAILED", wdt != NULL ? "ok" : "FAILED");
++}
+ 
+ class IOWatchdog : public IOService {
+ 	OSDeclareDefaultStructors(IOWatchdog);
+ 
+@@ -47,8 +85,9 @@
+ 		return false;
+ 	}
+ 	setProperty(kIOUserClientClassKey, "IOWatchdogUserClient");
+ 	setProperty("IOPMUPrimary", 1ULL, 32);
++	sweet_wdt_disarm_shim();
+ 	registerService();
+ 	IOLog("SWEET WDT: IOWatchdog registered (accepts check-ins, never fires)\n");
+ 	return true;
+ }
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -131,8 +131,21 @@
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+ 
++/*
++ * SWEET/0139: the GPU service class QuartzCore looks for. CAMetalContextCreate
++ * polls IOServiceMatching("IOAcceleratorES") 300 times, 100 ms apart, in every
++ * process that sets up CA rendering (backboardd included) -> ~30 s per process.
++ * No MetalPluginName, so Metal passes it over and CA still picks GLES.
++ * Boot-arg sweetaccel=0 leaves it out. From sailfish 0166 hunk 3.
++ */
++class IOAcceleratorES : public IOService {
++	OSDeclareDefaultStructors(IOAcceleratorES);
++};
++
++OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
++
+ class IOMobileFramebufferUserClient : public IOUserClient {
+ 	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
+ 
+ public:
+@@ -211,8 +224,15 @@
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+ 	registerService();
++	int accel = 1;
++	PE_parse_boot_argn("sweetaccel", &accel, sizeof(accel));
++	IOAcceleratorES *es = accel ? OSTypeAlloc(IOAcceleratorES) : NULL;
++	if (es != NULL && es->init() && es->attach(this)) {
++		es->registerService();
++	}
++	OSSafeReleaseNULL(es);
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
+ 	return true;
+ }
+--- a/iokit/Kernel/arm/SweetKeyStore.cpp
++++ b/iokit/Kernel/arm/SweetKeyStore.cpp
+@@ -53,12 +53,14 @@
+ /* The system (device) bag handle. */
+ #define SWEET_AKS_SYSTEM_HANDLE 0
+ 
+ /*
+- * aks lock state bits (aks_get_lock_state): bit 2 is "unlocked since boot"
+- * (MobileKeyBag MKBDeviceUnlockedSinceBoot); clear lock bits = unlocked.
++ * SWEET/0139: bit 2 is "unlocked since boot" (MKBDeviceUnlockedSinceBoot),
++ * bit 1 is "no passcode". With only bit 2 (and device state sls 0) coreduetd
++ * asked for the device state thousands of times a minute; HackiOS answers
++ * no passcode, lock state disabled. From sailfish 0180.
+  */
+-#define SWEET_AKS_LOCK_STATE    0x4
++#define SWEET_AKS_LOCK_STATE    0x6
+ 
+ class AppleKeyStore : public IOService {
+ 	OSDeclareDefaultStructors(AppleKeyStore);
+ 
+@@ -149,9 +151,9 @@
+ 	static const struct {
+ 		const char *key;
+ 		uint8_t value;
+ 	} fields[] = {
+-		{ "ss", SWEET_AKS_LOCK_STATE }, { "sls", 0 }, { "sb", 0 }, { "sfa", 0 },
++		{ "ss", SWEET_AKS_LOCK_STATE }, { "sls", 3 }, { "sb", 0 }, { "sfa", 0 },
+ 		{ "sgs", 0 }, { "sas", 0 }, { "sgpe", 0 }, { "srcd", 0 },
+ 	};
+ 	uint8_t buf[128];
+ 	uint32_t n = 2;
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -27,8 +27,9 @@
+ #include <kern/startup.h>
+ #include <libkern/amfi/amfi.h>
+ #include <mach/kern_return.h>
+ #include <sys/codesign.h>
++#include <sys/kauth.h>
+ #include <sys/mount.h>
+ #include <sys/priv.h>
+ #include <sys/proc.h>
+ #include <sys/systm.h>
+@@ -284,19 +285,63 @@
+  * use of each operation number is logged.
+  */
+ static uint64_t sweet_sandbox_seen;
+ 
++/*
++ * SWEET/0139: op 4, container path of a pid:
++ * arg -> {int64 pid; 0; char *buf; u64 len; 0}. PlugInKit's checkEnvironment
++ * aborts every app extension ("plugin has invalid sandbox or container")
++ * without one. An executable inside a .appex running as mobile gets the
++ * mobile home; everything else gets ENOENT, as on an uncontainerized iOS.
++ * From sailfish 0110.
++ */
+ static int
+-sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
++sweet_sandbox_container_path(user_addr_t arg)
++{
++	uint64_t a[5];
++	char path[MAXPATHLEN];
++	int len = sizeof(path), err = ENOENT;
++	static const char home[] = "/private/var/mobile";
++	proc_t p;
++	kauth_cred_t cred;
++	uid_t uid;
++	vnode_t vp;
++
++	if (copyin(arg, a, sizeof(a)) != 0 || a[2] == 0 || a[3] < sizeof(home)) {
++		return ENOENT;
++	}
++	p = proc_find((int)a[0]);
++	if (p == NULL) {
++		return ESRCH;
++	}
++	cred = kauth_cred_proc_ref(p);
++	uid = kauth_cred_getuid(cred);
++	kauth_cred_unref(&cred);
++	vp = proc_getexecutablevnode(p);
++	proc_rele(p);
++	if (vp == NULLVP) {
++		return ENOENT;
++	}
++	if (uid == 501 && vn_getpath(vp, path, &len) == 0 &&
++	    strnstr(path, ".appex/", sizeof(path)) != NULL) {
++		err = copyout(home, (user_addr_t)a[2], sizeof(home));
++	}
++	vnode_put(vp);
++	return err;
++}
++
++static int
++sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
+ {
+ 	if (call >= 0 && call < 64 && !(sweet_sandbox_seen & (1ULL << call))) {
+ 		sweet_sandbox_seen |= 1ULL << call;
+ 		char name[32];
+ 		proc_name(proc_pid(p), name, sizeof(name));
+ 		printf("SWEET Sandbox: %s op %d\n", name, call);
+ 	}
+ 	switch (call) {
+-	case 4:         /* container path (audit token / pid) */
++	case 4:         /* container path (pid) */
++		return sweet_sandbox_container_path(arg);
+ 	case 5:         /* extension issue */
+ 	case 6:         /* extension consume */
+ 	case 0x43:      /* container expected */
+ 		return ENOENT;
