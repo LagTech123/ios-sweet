@@ -35,6 +35,8 @@ used). Awaiting verification and a p54 payload write.
 
 **0129/0130:** seputil passes every marker inside `process_signature()` (through `0g before return`) but never reaches the `1 after process_signature` marker in `__mac_execve()`. An atomic pstore tee (0130) produced an identical pattern, proving this is a real control-flow difference: `process_signature()` has two call sites — `posix_spawn()` at `kern_exec.c:4461` and `__mac_execve()` at 5053 — and seputil takes the posix_spawn path. 0131 (pushed, CI 45269294790) instruments both call sites and also fixes the live console overlay to draw into the presented surface.
 
+**0135 sampler changed the diagnosis:** seputil is runnable in a shared-cache page fault (`esr 0x92000007`) while the single-sector CMD17 eMMC driver delivers only ~1.8-3.6 MB/s, so dyld simply cannot finish inside the 40 s watchdog — seputil is slow, not wedged. 0136 (pushed, CI 45344986056) switches to CMD23+CMD18 multi-block reads with auto-CMD12 for ~10-20x throughput, with `emmcmulti=0` / `emmccmd23=0` boot-arg rollback. The `ignite() returned 25` preboot warning is normal and also present on the working sailfish port.
+
 | Area | State |
 | --- | --- |
 | Boot chain | Sony ABL → shim (`SWEETXNU` payload loader) → XNU at EL1, MMU off |
