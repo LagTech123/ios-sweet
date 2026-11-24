@@ -1,0 +1,42 @@
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -298,18 +298,27 @@
+ live_draw_cell(unsigned int row, unsigned int col, unsigned char c)
+ {
+ 	const unsigned char *glyph = iso_font + c * 16;
+-	/* 0134: write through the early FB alias, the mapping that is known to
+-	 * reach the panel.  fPixels (a cacheable kernel mapping) never showed. */
+-	(void)live_stride;
+-	for (unsigned int gy = 0; gy < 16; gy++) {
+-		for (unsigned int sy = 0; sy < EARLY_SCALE; sy++) {
+-			volatile uint32_t *line = EARLY_FB +
+-			    (row * EARLY_CELL_H + gy * EARLY_SCALE + sy) * EARLY_STRIDE +
+-			    col * EARLY_CELL_W;
+-			for (unsigned int gx = 0; gx < 8; gx++) {
+-				uint32_t pixel = (glyph[gy] & (1u << gx)) ? 0xffffffffu : 0xff000000u;
+-				for (unsigned int sx = 0; sx < EARLY_SCALE; sx++) {
+-					line[gx * EARLY_SCALE + sx] = pixel;
++	/* 0138: draw into BOTH buffers. The early FB alias is what the panel
++	 * shows before the display server starts; fPixels (live_fb) is the
++	 * surface AppleCLCD actually presents. 0134 only drew into the alias,
++	 * so the console froze once present() took over unless log spam
++	 * happened to keep the alias refreshed. */
++	for (unsigned int pass = 0; pass < 2; pass++) {
++		volatile uint32_t *base = pass == 0 ? EARLY_FB : live_fb;
++		unsigned int stride = pass == 0 ? EARLY_STRIDE : live_stride;
++		if (base == NULL || stride == 0) {
++			continue;
++		}
++		for (unsigned int gy = 0; gy < 16; gy++) {
++			for (unsigned int sy = 0; sy < EARLY_SCALE; sy++) {
++				volatile uint32_t *line = base +
++				    (row * EARLY_CELL_H + gy * EARLY_SCALE + sy) * stride +
++				    col * EARLY_CELL_W;
++				for (unsigned int gx = 0; gx < 8; gx++) {
++					uint32_t pixel = (glyph[gy] & (1u << gx)) ? 0xffffffffu : 0xff000000u;
++					for (unsigned int sx = 0; sx < EARLY_SCALE; sx++) {
++						line[gx * EARLY_SCALE + sx] = pixel;
++					}
+ 				}
+ 			}
+ 		}
