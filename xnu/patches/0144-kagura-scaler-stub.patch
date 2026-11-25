@@ -1,0 +1,37 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -144,8 +144,20 @@
+ };
+ 
+ OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
+ 
++/*
++ * SWEET/0144: backboardd polls IOServiceMatching("AppleM2ScalerCSCDriver")
++ * hundreds of times when no GPU colour-space driver exists (800+ lines in
++ * xnu-0143-long10min-20261125.txt). Publish a no-op service with that name;
++ * no MetalPluginName, so Metal/CA still pick their existing path.
++ */
++class AppleM2ScalerCSCDriver : public IOService {
++	OSDeclareDefaultStructors(AppleM2ScalerCSCDriver);
++};
++
++OSDefineMetaClassAndStructors(AppleM2ScalerCSCDriver, IOService);
++
+ class IOMobileFramebufferUserClient : public IOUserClient {
+ 	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
+ 
+ public:
+@@ -231,8 +243,13 @@
+ 	if (es != NULL && es->init() && es->attach(this)) {
+ 		es->registerService();
+ 	}
+ 	OSSafeReleaseNULL(es);
++	AppleM2ScalerCSCDriver *csc = OSTypeAlloc(AppleM2ScalerCSCDriver);
++	if (csc != NULL && csc->init() && csc->attach(this)) {
++		csc->registerService();
++	}
++	OSSafeReleaseNULL(csc);
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
+ 	return true;
+ }
