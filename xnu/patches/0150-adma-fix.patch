@@ -1,0 +1,53 @@
+--- a/bsd/dev/kagura_emmc.c
++++ b/bsd/dev/kagura_emmc.c
+@@ -257,8 +257,9 @@
+ 	uint32_t enable, signal, status;
+ 	uint64_t phys;
+ 	uint32_t ndesc = 0;
+ 	size_t remain = (size_t)nsect * KEMMC_SECTOR;
++	uint8_t hc;
+ 	int error = 0;
+ 
+ 	error = emmc_wait_idle();
+ 	if (error) {
+@@ -284,13 +285,13 @@
+ 		ndesc++;
+ 		phys += len;
+ 		remain -= len;
+ 	}
+-	{
+-		uint16_t hc2 = emmc_rd16(SDHCI_HOST_CONTROL2);
+-		emmc_wr16(SDHCI_HOST_CONTROL2,
+-		    (uint16_t)((hc2 & ~0x18u) | 0x08u)); /* DMA select = ADMA2 */
+-	}
++	/* 0150: DMA select lives in HOST_CONTROL (0x28) bits 3:4 —
++	 * 0x00 SDMA, 0x08 ADMA1, 0x10 ADMA2, 0x18 ADMA2-64. Host Control 2
++	 * is not the right register (the 0149 attempt stalled there). */
++	hc = emmc_rd8(SDHCI_HOST_CONTROL);
++	emmc_wr8(SDHCI_HOST_CONTROL, (uint8_t)((hc & ~0x18u) | 0x10u));
+ 	emmc_wr32(SDHCI_ADMA2_ADDRESS,
+ 	    (uint32_t)(uintptr_t)ml_vtophys((vm_offset_t)kemmc_adma_desc));
+ 	emmc_wr32(SDHCI_ADMA2_ADDRESS_HI, 0);
+ 	emmc_wr16(SDHCI_BLOCK_SIZE, (uint16_t)KEMMC_SECTOR);
+@@ -320,8 +321,21 @@
+ 			    status, emmc_rd32(SDHCI_PRESENT_STATE));
+ 			error = ETIMEDOUT;
+ 		}
+ 	}
++	if (error != 0) {
++		/* Clear a half-finished DMA transfer before the PIO fallback
++		 * reuses the same controller state. */
++		emmc_wr8(SDHCI_SOFTWARE_RESET,
++		    (uint8_t)(RESET_CMD | RESET_DATA));
++		for (unsigned i = 0; i < KEMMC_TIMEOUT; i++) {
++			if (!(emmc_rd8(SDHCI_SOFTWARE_RESET) &
++			    (RESET_CMD | RESET_DATA))) {
++				break;
++			}
++		}
++	}
++	emmc_wr8(SDHCI_HOST_CONTROL, hc);
+ 	emmc_wr32(SDHCI_INT_STATUS, emmc_rd32(SDHCI_INT_STATUS));
+ 	emmc_wr32(SDHCI_INT_ENABLE, enable);
+ 	emmc_wr32(SDHCI_SIGNAL_ENABLE, signal);
+ 	return error;
