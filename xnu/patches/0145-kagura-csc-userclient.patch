@@ -1,0 +1,76 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -150,13 +150,73 @@
+  * hundreds of times when no GPU colour-space driver exists (800+ lines in
+  * xnu-0143-long10min-20261125.txt). Publish a no-op service with that name;
+  * no MetalPluginName, so Metal/CA still pick their existing path.
+  */
++class AppleM2ScalerCSCDriverUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(AppleM2ScalerCSCDriverUserClient);
++
++public:
++	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target,
++	    void *reference) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(AppleM2ScalerCSCDriverUserClient, IOUserClient);
++
++bool
++AppleM2ScalerCSCDriverUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
++{
++	return IOUserClient::initWithTask(owningTask, securityID, type);
++}
++
++IOReturn
++AppleM2ScalerCSCDriverUserClient::externalMethod(uint32_t selector,
++    IOExternalMethodArguments *args, IOExternalMethodDispatch *dispatch,
++    OSObject *target, void *reference)
++{
++	(void)selector; (void)dispatch; (void)target; (void)reference;
++	if (args != NULL) {
++		args->scalarOutputCount = 0;
++		args->structureOutputSize = 0;
++	}
++	return kIOReturnSuccess;
++}
++
++/*
++ * SWEET/0145: backboardd calls IOServiceOpen(type 0) on the 0144 CSC stub
++ * and gets kIOReturnUnsupported (0xe00002c7) from IOService's default
++ * newUserClient, so it retries ~42 times and gives up before submitting a
++ * frame.  Hand it a no-op IOUserClient so the open succeeds.
++ */
+ class AppleM2ScalerCSCDriver : public IOService {
+ 	OSDeclareDefaultStructors(AppleM2ScalerCSCDriver);
++
++public:
++	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
++	    OSDictionary *properties,
++	    LIBKERN_RETURNS_RETAINED IOUserClient **handler) APPLE_KEXT_OVERRIDE;
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleM2ScalerCSCDriver, IOService);
++
++IOReturn
++AppleM2ScalerCSCDriver::newUserClient(task_t owningTask, void *securityID,
++    UInt32 type, OSDictionary *properties, IOUserClient **handler)
++{
++	AppleM2ScalerCSCDriverUserClient *uc = OSTypeAlloc(AppleM2ScalerCSCDriverUserClient);
++	if (uc == NULL) {
++		return kIOReturnNoMemory;
++	}
++	if (!uc->initWithTask(owningTask, securityID, type)) {
++		uc->release();
++		return kIOReturnError;
++	}
++	(void)properties;
++	*handler = uc;
++	IOLog("SWEET FB: AppleM2ScalerCSCDriver user client type %u\n", type);
++	return kIOReturnSuccess;
++}
+ 
+ class IOMobileFramebufferUserClient : public IOUserClient {
+ 	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
+ 
