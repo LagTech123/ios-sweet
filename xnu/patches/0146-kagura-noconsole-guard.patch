@@ -1,0 +1,84 @@
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -9,9 +9,17 @@
+ 
+ #if defined(SWEET)
+ #include <stdint.h>
+ #include <kern/misc_protos.h>
++#include <kern/startup.h>
++#include <pexpert/pexpert.h>
+ #include <arm/machine_routines.h>
++
++/* 0146: sweetfb_noconsole=1 must mute EVERY glyph path (the early renderer,
++ * the live IOSurface console and its repaint after a swap).  Previously only
++ * AppleCLCD::present() set this flag and none of the drawing code checked it.
++ * pstore logging remains untouched. */
++extern int sweet_console_muted;  /* osfmk/console/serial_console.c */
+ 
+ /* 0110: keep the 4K-aligned splash FB (PA 0x83401000). Never use the DTB
+  * address 0x82000000, which is neither aligned to the FB stride nor mapped
+  * as the framebuffer after the kernel MMU takes over. */
+@@ -40,8 +48,19 @@
+  * XNU only writes glyphs and kicks a frame commit on newline. */
+ static unsigned int early_fb_off = 0;
+ /* 0101: only tee kprintf/printf after marker 60 (pstore is 256 KB). */
+ static unsigned int early_tee_on;
++
++__startup_func
++static void
++sweet_early_noconsole_config(void)
++{
++	int quiet = 0;
++	if (PE_parse_boot_argn("sweetfb_noconsole", &quiet, sizeof(quiet)) && quiet != 0) {
++		sweet_console_muted = 1;
++	}
++}
++STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, sweet_early_noconsole_config);
+ 
+ void
+ sweet_early_enable_tee(void)
+ {
+@@ -202,9 +221,9 @@
+ sweet_early_fb_putc(char c)
+ {
+ 	/* 0122: glyph-only path.  FB uses the TTBR1 high alias (0121), so
+ 	 * glyphs keep flowing after TTBR0 is gone (IOWatchdog et al.). */
+-	if (early_disabled || early_fb_off) {
++	if (early_disabled || early_fb_off || sweet_console_muted) {
+ 		return;
+ 	}
+ 	if (!early_started) {
+ 		early_started = 1;
+@@ -361,9 +380,9 @@
+ 
+ void
+ sweet_early_live_putc(char c)
+ {
+-	if (live_fb == NULL) {
++	if (sweet_console_muted || live_fb == NULL) {
+ 		return;
+ 	}
+ 	if (__sync_lock_test_and_set(&live_lock, 1)) {
+ 		return;
+@@ -395,9 +414,9 @@
+ 
+ void
+ sweet_early_live_repaint(void)
+ {
+-	if (live_fb == NULL || __sync_lock_test_and_set(&live_lock, 1)) {
++	if (sweet_console_muted || live_fb == NULL || __sync_lock_test_and_set(&live_lock, 1)) {
+ 		return;
+ 	}
+ 	for (unsigned int r = 0; r < live_rows; r++) {
+ 		for (unsigned int col = 0; col < live_cols; col++) {
+@@ -409,9 +428,9 @@
+ 
+ void
+ sweet_early_draw_console_tail(const char *buf, unsigned int len)
+ {
+-	if (early_disabled || early_fb_off) {
++	if (early_disabled || early_fb_off || sweet_console_muted) {
+ 		return;
+ 	}
+ 	sweet_early_draw_console_to(buf, len, EARLY_FB, EARLY_STRIDE, EARLY_COLS, EARLY_ROWS);
+ 	sweet_early_display_commit();
