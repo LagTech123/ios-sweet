@@ -1,0 +1,197 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -4457,11 +4457,9 @@
+ 	 * after exec_resettextvp() so that the textvp is correct when they
+ 	 * fire.
+ 	 */
+ 	if (error == 0) {
+-		sweet_early_pstore_string("SWEET EXECP: P0 posix_spawn before process_signature\n");
+ 		error = process_signature(p, imgp);
+-		sweet_early_pstore_string("SWEET EXECP: P1 posix_spawn after process_signature\n");
+ 
+ 		/*
+ 		 * Pay for our earlier safety; deliver the delayed signals from
+ 		 * the incomplete spawn process now that it's complete.
+@@ -4475,9 +4473,8 @@
+ 			    proc_getpid(p));
+ 		}
+ 	}
+ 
+-	sweet_early_pstore_string("SWEET EXECP: P2 posix_spawn after cleanup\n");
+ 	if (spawn_no_exec) {
+ 		/* flag the 'fork' has occurred */
+ 		proc_knote(p->p_pptr, NOTE_FORK | proc_getpid(p));
+ 	}
+@@ -4589,14 +4586,12 @@
+ 		}
+ 	}
+ #endif
+ 
+-	sweet_early_pstore_string("SWEET EXECP: P3 before exec-copy terminate\n");
+ 	/* terminate the new task if exec failed  */
+ 	if (new_task != NULL && task_is_exec_copy(new_task)) {
+ 		task_terminate_internal(new_task);
+ 	}
+-	sweet_early_pstore_string("SWEET EXECP: P4 after exec-copy terminate\n");
+ 
+ 	if (exec_failure_reason && !spawn_no_exec) {
+ 		psignal_with_reason(p, SIGKILL, exec_failure_reason);
+ 		exec_failure_reason = NULL;
+@@ -4644,21 +4639,17 @@
+ 	 * Do not terminate the current task, if proc_exec_switch_task did not
+ 	 * switch the tasks, terminating the current task without the switch would
+ 	 * result in loosing the SIGKILL status.
+ 	 */
+-	sweet_early_pstore_string("SWEET EXECP: P5 before task_did_exec\n");
+ 	if (task_did_exec(old_task)) {
+ 		/* Terminate the current task, since exec will start in new task */
+ 		task_terminate_internal(old_task);
+ 	}
+-	sweet_early_pstore_string("SWEET EXECP: P6 after old_task terminate\n");
+ 
+ 	/* Release the thread ref returned by cloneproc/fork1 */
+ 	if (imgp != NULL && imgp->ip_new_thread) {
+ 		/* wake up the new thread */
+-		sweet_early_pstore_string("SWEET EXECP: P7 before task_clear_return_wait\n");
+ 		task_clear_return_wait(get_threadtask(imgp->ip_new_thread), TCRW_CLEAR_FINAL_WAIT);
+-		sweet_early_pstore_string("SWEET EXECP: P8 after task_clear_return_wait\n");
+ 		thread_deallocate(imgp->ip_new_thread);
+ 		imgp->ip_new_thread = NULL;
+ 	}
+ 
+@@ -4677,9 +4668,8 @@
+ 	if (inherit != NULL) {
+ 		ipc_importance_release(inherit);
+ 	}
+ 
+-	sweet_early_pstore_string("SWEET EXECP: P9 posix_spawn return\n");
+ 	assert(exec_failure_reason == NULL);
+ 	return error;
+ }
+ 
+@@ -5059,11 +5049,9 @@
+ 		 */
+ 		ipc_task_enable(new_task);
+ 
+ 		exec_resettextvp(p, imgp);
+-		sweet_early_pstore_string("SWEET EXECP: E0 __mac_execve before process_signature\n");
+ 		error = process_signature(p, imgp);
+-		sweet_early_pstore_string("SWEET EXECP: 1 after process_signature\n");
+ 	}
+ 
+ #if defined(HAS_APPLE_PAC)
+ 	if (imgp->ip_new_thread && !error) {
+@@ -5108,15 +5096,13 @@
+ 		 * exec_activate_image because task_bank_init checks entitlements that
+ 		 * aren't loaded until subsequent calls (including exec_resettextvp).
+ 		 */
+ 		error = proc_transstart(p, 0, 0);
+-		sweet_early_pstore_string("SWEET EXECP: 2 after proc_transstart\n");
+ 	}
+ 
+ 	if (!error) {
+ 		task_bank_init(new_task);
+ 		proc_transend(p, 0);
+-		sweet_early_pstore_string("SWEET EXECP: 3 after task_bank_init\n");
+ 
+ 		// Don't inherit crash behavior across exec
+ 		p->p_crash_behavior = 0;
+ 		p->p_crash_behavior_deadline = 0;
+@@ -5128,9 +5114,8 @@
+ #if XNU_TARGET_OS_OSX
+ 		if (IOTaskHasEntitlement(new_task, SINGLE_JIT_ENTITLEMENT)) {
+ 			vm_map_single_jit(get_task_map(new_task));
+ 		}
+-		sweet_early_pstore_string("SWEET EXECP: 4 after IOTaskHasEntitlement\n");
+ #endif /* XNU_TARGET_OS_OSX */
+ 
+ 		/* Sever any extant thread affinity */
+ 		thread_affinity_exec(current_thread());
+@@ -5154,9 +5139,8 @@
+ 		arcade_prepare(new_task, imgp->ip_new_thread);
+ #endif /* CONFIG_ARCADE */
+ 
+ 		proc_apply_jit_and_vm_policies(imgp, p, new_task);
+-		sweet_early_pstore_string("SWEET EXECP: 5 after apply_jit_vm\n");
+ 
+ 		if (vm_darkwake_mode == TRUE) {
+ 			/*
+ 			 * This process is being launched when the system
+@@ -7440,9 +7424,8 @@
+ 			}
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 			/* SWEET runs every iOS binary this way: one short line per exec. */
+ 			printf("exec %s\n", p->p_name);
+-			sweet_early_pstore_string("SWEET EXECP: 0 in process_signature\n");
+ #else
+ 			printf("Allowing spawn of iOS binary %s since it has "
+ 			    "com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch "
+ 			    "boot-arg set to true\n", p->p_name);
+@@ -7463,19 +7446,16 @@
+ 	/* If the code signature came through the image activation path, we skip the
+ 	 * taskgated / externally attached path. */
+ 	if (imgp->ip_csflags & CS_SIGNED) {
+ 		error = 0;
+-		sweet_early_pstore_string("SWEET EXECP: 0a CS_SIGNED set, goto done\n");
+ 		goto done;
+ 	}
+-	sweet_early_pstore_string("SWEET EXECP: 0a CS_SIGNED clear\n");
+ 
+ 	/* The rest of the code is for signatures that either already have been externally
+ 	 * attached (likely, but not necessarily by a previous run through the taskgated
+ 	 * path), or that will now be attached by taskgated. */
+ 
+ 	kr = task_get_task_access_port(proc_task(p), &port);
+-	sweet_early_pstore_string("SWEET EXECP: 0c after task_get_task_access_port\n");
+ 	if (KERN_SUCCESS != kr || !IPC_PORT_VALID(port)) {
+ 		error = 0;
+ 		if (require_success) {
+ 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
+@@ -7493,9 +7473,8 @@
+ 	 * event of mig failure (e.g. process was signalled during the
+ 	 * rpc call, taskgated died, mig server died etc.).
+ 	 */
+ 
+-	sweet_early_pstore_string("SWEET EXECP: 0b before taskgated upcall\n");
+ 	kr = __EXEC_WAITING_ON_TASKGATED_CODE_SIGNATURE_UPCALL__(port, proc_getpid(p));
+ 	switch (kr) {
+ 	case KERN_SUCCESS:
+ 		error = 0;
+@@ -7556,17 +7535,15 @@
+ 		}
+ 	}
+ 
+ done:
+-	sweet_early_pstore_string("SWEET EXECP: 0d at done label\n");
+ 	if (0 == error) {
+ 		/*
+ 		 * Update the new process's signature-dependent process state.
+ 		 * state.
+ 		 */
+ 
+ 		error = proc_process_signature(p, &signature_failure_reason);
+-		sweet_early_pstore_string("SWEET EXECP: 0e after proc_process_signature\n");
+ 	}
+ 
+ 	if (0 == error) {
+ 		/*
+@@ -7575,9 +7552,8 @@
+ 		 * but for the main thread the signature was not yet attached
+ 		 * at that time.
+ 		 */
+ 		kr = thread_process_signature(imgp->ip_new_thread, proc_get_task_raw(p));
+-		sweet_early_pstore_string("SWEET EXECP: 0f after thread_process_signature\n");
+ 
+ 		if (kr != KERN_SUCCESS) {
+ 			error = EINVAL;
+ 			signature_failure_reason = os_reason_create(OS_REASON_EXEC, EXEC_EXIT_REASON_MACHINE_THREAD);
+@@ -7620,9 +7596,8 @@
+ 	}
+ 
+ 	/* If we hit this, we likely would have leaked an exit reason */
+ 	assert(signature_failure_reason == OS_REASON_NULL);
+-	sweet_early_pstore_string("SWEET EXECP: 0g before return\n");
+ 	return error;
+ }
+ 
+ /*
