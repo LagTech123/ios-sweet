@@ -1,0 +1,17 @@
+--- a/bsd/dev/kagura_emmc.c
++++ b/bsd/dev/kagura_emmc.c
+@@ -92,10 +92,12 @@
+ 	    (uint64_t)kemmc_dbg_off);
+ }
+ static char kemmc_partition_name[16] = "userdata";
+ static uint32_t kemmc_secsize = KEMMC_SECTOR;
+-/* 0136: batched CMD18 reads. emmcmulti=0 restores the old CMD17 path. */
+-#define KEMMC_MULTI_MAX         64u
++/* 0136: batched CMD18 reads. emmcmulti=0 restores the old CMD17 path.
++ * 0148: 1024 sectors (512 KB) per CMD18 instead of 64, so a typical
++ * 128-256 KB dyld page-in needs one command instead of 4-8. */
++#define KEMMC_MULTI_MAX         1024u
+ static uint8_t kemmc_multi_bounce[KEMMC_MULTI_MAX * KEMMC_SECTOR];
+ static int kemmc_use_multi = -1;
+ static int kemmc_do_cmd23 = 1;
+ /* 0137: CMD18 buffer-read polling and single-sector fallback. */
