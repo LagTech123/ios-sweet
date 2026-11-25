@@ -1,0 +1,44 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 9dedf81..ea1cde0 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -133,6 +133,7 @@ public:
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+ extern "C" void CleanPoC_DcacheRegion_Force(vm_offset_t va, size_t length);
+ static int sweet_fb_clean = 1;	/* boot-arg sweetfb_clean=0 disables */
++static int sweet_fb_bars = 0;	/* boot-arg sweetfb_bars=1: show colour bars instead of client frames */
+ 
+ /*
+  * SWEET/0139: the GPU service class QuartzCore looks for. CAMetalContextCreate
+@@ -270,6 +271,7 @@ AppleCLCD::start(IOService *provider)
+ 	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
+ 	PE_parse_boot_argn("sweetfb_clean", &sweet_fb_clean, sizeof(sweet_fb_clean));
++	PE_parse_boot_argn("sweetfb_bars", &sweet_fb_bars, sizeof(sweet_fb_bars));
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -435,6 +437,23 @@ AppleCLCD::present(const uint8_t *rec)
+ 		}
+ 	}
+ 
++	if (sweet_fb_bars) {
++		/* 0153 diagnostic: 8 vertical colour bars + a white top strip, written
++		 * through fPixels and cleaned to the PoC; proves fPixels -> panel. */
++		static const uint32_t col[8] = { 0xffffffff, 0xffff0000, 0xff00ff00, 0xff0000ff,
++			                         0xffffff00, 0xff00ffff, 0xffff00ff, 0xff808080 };
++		for (uint32_t y = 0; y < fHeight; y++) {
++			volatile uint32_t *row = (volatile uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
++			for (uint32_t x = 0; x < fWidth; x++) {
++				row[x] = (y < 96) ? 0xffffffff : col[(x * 8) / fWidth];
++			}
++		}
++		CleanPoC_DcacheRegion_Force((vm_offset_t)fPixels, (size_t)fRowBytes * fHeight);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		sweet_early_display_commit();
++#endif
++		return;
++	}
+ 	for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+ 		uint32_t id = get32(rec, 0x54 + 4 * layer);
+ 		const uint8_t *a = rec + 0x64 + 16 * layer;
