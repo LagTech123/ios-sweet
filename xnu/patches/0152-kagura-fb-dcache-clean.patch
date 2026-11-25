@@ -1,0 +1,39 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 07f868e..9dedf81 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -131,6 +131,8 @@ public:
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
++extern "C" void CleanPoC_DcacheRegion_Force(vm_offset_t va, size_t length);
++static int sweet_fb_clean = 1;	/* boot-arg sweetfb_clean=0 disables */
+ 
+ /*
+  * SWEET/0139: the GPU service class QuartzCore looks for. CAMetalContextCreate
+@@ -267,6 +269,7 @@ AppleCLCD::start(IOService *provider)
+ 	}
+ 	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	PE_parse_boot_argn("sweetfb_clean", &sweet_fb_clean, sizeof(sweet_fb_clean));
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -500,9 +503,16 @@ AppleCLCD::present(const uint8_t *rec)
+ 		}
+ 		if (src != 0 && bpe == 4) {
+ 			for (int32_t y = 0; y < h; y++) {
+-				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
++				void *dst = (void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4);
++				memcpy(dst,
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+ 				    (size_t)w * 4);
++				/* 0152: fPixels behaves as a cacheable mapping (0134 saw it never
++				 * show); MDP scans DRAM, so push each row to the PoC or the pixels
++				 * only appear when the line is evicted minutes later. */
++				if (sweet_fb_clean) {
++					CleanPoC_DcacheRegion_Force((vm_offset_t)dst, (size_t)w * 4);
++				}
+ 			}
+ 		}
+ 		s->release();
