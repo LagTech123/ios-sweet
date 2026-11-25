@@ -1,0 +1,13 @@
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1039,9 +1039,9 @@
+ 
+ 	task_lock(task);
+ 	queue_iterate(&task->threads, thread, thread_t, task_threads) {
+ 		arm_saved_state_t *ss = find_user_regs(thread);
+-		char line[400];
++		char line[1024];
+ 		int n;
+ 		uint64_t fp;
+ 
+ 		if (ss == NULL || !is_saved_state64(ss)) {
