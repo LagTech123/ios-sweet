@@ -1,0 +1,22 @@
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 8068995..067c701 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -483,7 +483,17 @@ sweet_early_panic(const char *fmt, va_list *args)
+ 		return;
+ 	}
+ 	early_panicking = 1;
++	/* 0163: the console ring is 256 KB and may be full, and the next boot's
++	 * shim can rewrite its header. Restart the ramoops record here so the
++	 * panic reason is always the first text in console-ramoops. */
++	while (__sync_lock_test_and_set(&sweet_pstore_lock, 1u)) {
++	}
++	early_pstore_len = 0;
++	__sync_lock_release(&sweet_pstore_lock);
+ 	sweet_early_pstore_putc('\n');
++	sweet_early_pstore_string("KAGURA PANIC FMT: ");
++	sweet_early_pstore_string(fmt);
++	sweet_early_pstore_string("\n");
+ 	sweet_early_pstore_string("SWEET EARLY PANIC: ");
+ 	va_list copy;
+ 	va_copy(copy, *args);
