@@ -1,0 +1,50 @@
+diff --git a/bsd/dev/kagura_emmc.c b/bsd/dev/kagura_emmc.c
+index a0c399e..1488740 100644
+--- a/bsd/dev/kagura_emmc.c
++++ b/bsd/dev/kagura_emmc.c
+@@ -836,17 +836,29 @@ done:
+ 
+ /* 0159: ADMA2 wrapper with PIO fallback. */
+ static unsigned kemmc_pio1_diverts;   /* 0161: rate-limited divert logging */
++/* 0162: ADMA2 corrupts small HFS metadata reads (16-sector catalog node at
++ * LBA 3841568) but is sound for 128 KiB bulk. emmcadma_min defaults to 32
++ * sectors (16 KiB = iOS page size), keeping dyld page faults on DMA. */
++static uint32_t kemmc_adma_min_sectors = 32u;
++static unsigned kemmc_adma_diverts;   /* 0162: rate-limited ADMA2 read log */
+ 
+ static int
+ emmc_read_multi(uint32_t lba, uint32_t nsect, uint8_t *dst)
+ {
+ 	int error;
+ 
+-	/* 0161: lavender 0233 converted CMD18 to CMD17 for a single block; the
+-	 * 0159 port dropped that and ADMA2+CMD18+AUTO_CMD12 on one block returns
+-	 * zeros here (HFS volume header reads as one sector). Bulk ADMA2 is sound
+-	 * (128 KiB self-test IDENTICAL), so gate only the single-sector case. */
+-	if (kemmc_adma_on && nsect >= 2 && nsect <= KEMMC_MULTI_MAX) {
++	/* 0161/0162: single-block ADMA2+CMD18 returns zeros (HFS volume header),
++	 * and 16-sector catalog-node reads are also ADMA2-sensitive here. 0162
++	 * makes the minimum boot-tunable (emmcadma_min, default 32 sectors) so
++	 * metadata stays on the proven CMD17 PIO path while dyld page faults
++	 * remain on ADMA2. */
++	if (kemmc_adma_on && nsect >= kemmc_adma_min_sectors &&
++	    nsect <= KEMMC_MULTI_MAX) {
++		if (kemmc_adma_diverts < 16) {
++			kemmc_adma_diverts++;
++			printf("KAGURA eMMC: ADMA2 read %u lba=%u nsect=%u\n",
++			    kemmc_adma_diverts, lba, nsect);
++		}
+ 		error = emmc_read_multi_adma(lba, nsect, dst,
+ 		    (uint64_t)(uintptr_t)ml_vtophys((vm_offset_t)dst));
+ 		if (!error) {
+@@ -992,6 +1004,10 @@ kagura_emmc_rootdev(dev_t *dev)
+ 			int want = 1;   /* boot-arg emmcadma=0 keeps PIO */
+ 
+ 			(void)PE_parse_boot_argn("emmcadma", &want, sizeof(want));
++			(void)PE_parse_boot_argn("emmcadma_min", &kemmc_adma_min_sectors,
++			    sizeof(kemmc_adma_min_sectors));
++			printf("KAGURA eMMC: ADMA2 min sectors=%u emmcadma=%d\n",
++			    kemmc_adma_min_sectors, want);
+ 			if (want && (emmc_rd32(SDHCI_CAPABILITIES) & (1u << 19))) {
+ 				kemmc_adma_on = true;
+ 				printf("KAGURA eMMC: ADMA2 read path armed, self-test next\n");
