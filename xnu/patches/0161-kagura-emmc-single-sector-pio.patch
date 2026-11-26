@@ -1,0 +1,36 @@
+diff --git a/bsd/dev/kagura_emmc.c b/bsd/dev/kagura_emmc.c
+index f7f9834..a0c399e 100644
+--- a/bsd/dev/kagura_emmc.c
++++ b/bsd/dev/kagura_emmc.c
+@@ -835,12 +835,18 @@ done:
+ 
+ 
+ /* 0159: ADMA2 wrapper with PIO fallback. */
++static unsigned kemmc_pio1_diverts;   /* 0161: rate-limited divert logging */
++
+ static int
+ emmc_read_multi(uint32_t lba, uint32_t nsect, uint8_t *dst)
+ {
+ 	int error;
+ 
+-	if (kemmc_adma_on && nsect <= KEMMC_MULTI_MAX) {
++	/* 0161: lavender 0233 converted CMD18 to CMD17 for a single block; the
++	 * 0159 port dropped that and ADMA2+CMD18+AUTO_CMD12 on one block returns
++	 * zeros here (HFS volume header reads as one sector). Bulk ADMA2 is sound
++	 * (128 KiB self-test IDENTICAL), so gate only the single-sector case. */
++	if (kemmc_adma_on && nsect >= 2 && nsect <= KEMMC_MULTI_MAX) {
+ 		error = emmc_read_multi_adma(lba, nsect, dst,
+ 		    (uint64_t)(uintptr_t)ml_vtophys((vm_offset_t)dst));
+ 		if (!error) {
+@@ -849,6 +855,11 @@ emmc_read_multi(uint32_t lba, uint32_t nsect, uint8_t *dst)
+ 		printf("KAGURA eMMC: ADMA2 failed (%d), falling back to PIO\n", error);
+ 		kemmc_adma_on = false;
+ 	}
++	if (nsect == 1 && kemmc_pio1_diverts < 8) {
++		kemmc_pio1_diverts++;
++		printf("KAGURA eMMC: single-sector read %u -> CMD17 PIO\n",
++		    kemmc_pio1_diverts);
++	}
+ 	return emmc_read_multi_pio(lba, nsect, dst);
+ }
+ 
