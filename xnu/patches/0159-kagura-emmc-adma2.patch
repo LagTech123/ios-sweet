@@ -1,0 +1,241 @@
+--- a/bsd/dev/kagura_emmc.c
++++ b/bsd/dev/kagura_emmc.c
+@@ -24,8 +24,10 @@
+ #include <pexpert/device_tree.h>
+ #include <libkern/libkern.h>
+ #include <arm64/sweet_early.h>
++#include <arm/caches_internal.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern vm_offset_t ml_vtophys(vm_offset_t va);
+ 
+ /* Standard SD Host Controller register map (SDCC1 HC window). */
+ #define SDHCI_BLOCK_SIZE        0x04u
+@@ -48,6 +50,7 @@
+ #define SDHCI_CAPABILITIES      0x40u
+ #define SDHCI_CAPABILITIES_1    0x44u
+ #define SDHCI_ADMA_ERROR        0x54u
++#define SDHCI_ADMA_SYS_ADDR     0x58u
+ #define SDHCI_HOST_VERSION      0xFEu
+ 
+ #define PRES_CMD_INHIBIT        0x00000001u
+@@ -100,6 +103,32 @@
+ static uint8_t kemmc_multi_bounce[KEMMC_MULTI_MAX * KEMMC_SECTOR];
+ static int kemmc_use_multi = -1;
+ static int kemmc_do_cmd23 = 1;
++
++/*
++ * 0159: ADMA2 read path (port of lavender-ios16 0233). The 0149/0150 attempts
++ * used 12-byte descriptors with a 32-bit select and never cleaned the
++ * descriptor table or bounce buffer to PoC, so the controller read stale
++ * descriptors and stalled. Here: 8-byte descriptors, HOST_CONTROL DMA select
++ * 0x10 (ADMA2 32-bit), explicit dcache clean before and after the transfer,
++ * a PIO-vs-DMA self-test, and PIO fallback on any error. Reads only.
++ */
++#define ADMA_ATTR_VALID         0x0001u
++#define ADMA_ATTR_END           0x0002u
++#define ADMA_ATTR_TRAN          0x0020u
++#define ADMA_CHUNK              32768u
++#define ADMA_DESC_COUNT         (KEMMC_MULTI_MAX * KEMMC_SECTOR / ADMA_CHUNK)
++#define SDHCI_CTRL_ADMA2_32     0x10u
++struct kemmc_adma2_desc {
++	uint16_t attr;
++	uint16_t len;
++	uint32_t addr;
++} __attribute__((packed));
++static struct kemmc_adma2_desc kemmc_adma_desc[ADMA_DESC_COUNT]
++    __attribute__((aligned(64)));
++static bool kemmc_adma_on;
++static uint64_t kemmc_adma_reads, kemmc_adma_bytes;
++/* Wrapper defined after emmc_strategy; declare before its call site there. */
++static int emmc_read_multi(uint32_t lba, uint32_t nsect, uint8_t *dst);
+ /* 0137: CMD18 buffer-read polling and single-sector fallback. */
+ #define PRES_BUF_READ_ENABLE    0x00000800u
+ #define SDHCI_BUF_READ_READY    0x00000020u
+@@ -235,8 +264,111 @@
+  * of one per 512-byte sector -- roughly 10-20x faster for dyld shared-cache
+  * page faults. All clock/timing/bus state is left exactly as ABL set it up.
+  */
+-static int
+-emmc_read_multi(uint32_t lba, uint32_t nsect, uint8_t *dst)
++
++/* 0159: one CMD18/CMD17 into dst using ADMA2; dst_pa is its physical address. */
++static int
++emmc_read_multi_adma(uint32_t lba, uint32_t nsect, uint8_t *dst,
++    uint64_t dst_pa)
++{
++	uint32_t enable, signal, status;
++	uint32_t ndesc = 0;
++	size_t remain = (size_t)nsect * KEMMC_SECTOR;
++	uint8_t hc;
++	int error = 0;
++
++	if (!kemmc_adma_on || nsect == 0 || nsect > KEMMC_MULTI_MAX) {
++		return EINVAL;
++	}
++	if (dst_pa + remain > 0x100000000ull) {
++		return EINVAL;
++	}
++	error = emmc_wait_idle();
++	if (error) {
++		return error;
++	}
++	enable = emmc_rd32(SDHCI_INT_ENABLE);
++	signal = emmc_rd32(SDHCI_SIGNAL_ENABLE);
++	emmc_wr32(SDHCI_INT_ENABLE, 0x01ff00ffu);
++	emmc_wr32(SDHCI_SIGNAL_ENABLE, 0);
++	emmc_wr32(SDHCI_INT_STATUS, emmc_rd32(SDHCI_INT_STATUS));
++
++	while (remain != 0) {
++		size_t len = MIN(remain, ADMA_CHUNK);
++		uint16_t attr = ADMA_ATTR_VALID | ADMA_ATTR_TRAN;
++
++		if (len == remain) {
++			attr |= ADMA_ATTR_END;
++		}
++		kemmc_adma_desc[ndesc].attr = attr;
++		kemmc_adma_desc[ndesc].len = (uint16_t)len;
++		kemmc_adma_desc[ndesc].addr = (uint32_t)dst_pa;
++		ndesc++;
++		dst_pa += len;
++		remain -= len;
++	}
++	/* The host is not cache coherent: descriptors and data must reach DRAM. */
++	flush_dcache64((addr64_t)(uintptr_t)kemmc_adma_desc,
++	    (unsigned)(ndesc * sizeof(*kemmc_adma_desc)), FALSE);
++	flush_dcache64((addr64_t)(uintptr_t)dst,
++	    (unsigned)(nsect * KEMMC_SECTOR), FALSE);
++	__asm__ volatile ("dsb sy" ::: "memory");
++
++	hc = emmc_rd8(SDHCI_HOST_CONTROL);
++	emmc_wr8(SDHCI_HOST_CONTROL, (uint8_t)((hc & ~0x18u) | SDHCI_CTRL_ADMA2_32));
++	emmc_wr32(SDHCI_ADMA_SYS_ADDR,
++	    (uint32_t)(uintptr_t)ml_vtophys((vm_offset_t)kemmc_adma_desc));
++	emmc_wr16(SDHCI_BLOCK_SIZE, (uint16_t)KEMMC_SECTOR);
++	emmc_wr16(SDHCI_BLOCK_COUNT, (uint16_t)nsect);
++	emmc_wr32(SDHCI_ARGUMENT, lba);
++	emmc_wr8(SDHCI_TRANSFER_MODE, (uint8_t)(TRNS_DMA | TRNS_READ |
++	    TRNS_BLK_CNT_EN | TRNS_MULTI | TRNS_AUTO_CMD12));
++	emmc_wr16(SDHCI_COMMAND, (uint16_t)((18u << 8) | CMD_RESP_SHORT |
++	    CMD_CRC | CMD_INDEX | CMD_DATA));
++
++	kemmc_dbg_lba = lba;
++	kemmc_dbg_nsec += nsect;
++	for (unsigned i = 0; i < KEMMC_TIMEOUT; i++) {
++		status = emmc_rd32(SDHCI_INT_STATUS);
++		if (status & INT_ERROR_MASK) {
++			printf("KAGURA eMMC: ADMA2 error int=%x adma=%x state=%x\n",
++			    status, emmc_rd32(SDHCI_ADMA_ERROR),
++			    emmc_rd32(SDHCI_PRESENT_STATE));
++			error = EIO;
++			break;
++		}
++		if (status & INT_DATA_END) {
++			break;
++		}
++		if (i == KEMMC_TIMEOUT - 1) {
++			printf("KAGURA eMMC: ADMA2 timeout int=%x state=%x\n",
++			    status, emmc_rd32(SDHCI_PRESENT_STATE));
++			error = ETIMEDOUT;
++		}
++	}
++	/* Leave the controller exactly as the PIO path expects it. */
++	emmc_wr8(SDHCI_HOST_CONTROL, hc);
++	emmc_wr32(SDHCI_INT_STATUS, emmc_rd32(SDHCI_INT_STATUS));
++	emmc_wr32(SDHCI_INT_ENABLE, enable);
++	emmc_wr32(SDHCI_SIGNAL_ENABLE, signal);
++	if (error) {
++		emmc_wr8(SDHCI_SOFTWARE_RESET, (uint8_t)(RESET_CMD | RESET_DATA));
++		for (unsigned i = 0; i < KEMMC_TIMEOUT; i++) {
++			if (!(emmc_rd8(SDHCI_SOFTWARE_RESET) &
++			    (RESET_CMD | RESET_DATA))) {
++				break;
++			}
++		}
++		return error;
++	}
++	flush_dcache64((addr64_t)(uintptr_t)dst,
++	    (unsigned)(nsect * KEMMC_SECTOR), FALSE);
++	kemmc_adma_reads++;
++	kemmc_adma_bytes += nsect * KEMMC_SECTOR;
++	return 0;
++}
++
++static int
++emmc_read_multi_pio(uint32_t lba, uint32_t nsect, uint8_t *dst)
+ {
+ 	uint32_t enable, signal, status;
+ 	uint32_t pres;
+@@ -699,6 +831,55 @@
+ 		buf_seterror(bp, error);
+ 	}
+ 	buf_biodone(bp);
++}
++
++
++/* 0159: ADMA2 wrapper with PIO fallback. */
++static int
++emmc_read_multi(uint32_t lba, uint32_t nsect, uint8_t *dst)
++{
++	int error;
++
++	if (kemmc_adma_on && nsect <= KEMMC_MULTI_MAX) {
++		error = emmc_read_multi_adma(lba, nsect, dst,
++		    (uint64_t)(uintptr_t)ml_vtophys((vm_offset_t)dst));
++		if (!error) {
++			return 0;
++		}
++		printf("KAGURA eMMC: ADMA2 failed (%d), falling back to PIO\n", error);
++		kemmc_adma_on = false;
++	}
++	return emmc_read_multi_pio(lba, nsect, dst);
++}
++
++/* 0159: before the filesystem trusts ADMA2, compare 128 KiB PIO vs DMA. */
++static void
++kemmc_adma_selftest(void)
++{
++	const uint32_t blocks = 256u;
++	const uint32_t bytes = blocks * KEMMC_SECTOR;
++	uint8_t *pio_buf = kemmc_multi_bounce;
++	uint8_t *dma_buf = kemmc_multi_bounce + bytes;
++	uint64_t base_pa = (uint64_t)(uintptr_t)ml_vtophys(
++	    (vm_offset_t)kemmc_multi_bounce);
++	int perr, derr;
++
++	if (kemmc_nsectors < blocks + 8u) {
++		return;
++	}
++	memset(dma_buf, 0x5a, bytes);
++	lck_mtx_lock(&kemmc_lock);
++	perr = emmc_read_multi_pio((uint32_t)kemmc_first_lba, blocks, pio_buf);
++	derr = emmc_read_multi_adma((uint32_t)kemmc_first_lba, blocks,
++	    dma_buf, base_pa + bytes);
++	lck_mtx_unlock(&kemmc_lock);
++	printf("KAGURA eMMC: ADMA2 self-test 128 KiB: PIO %d ADMA2 %d data %s\n",
++	    perr, derr, (!perr && !derr && memcmp(pio_buf, dma_buf, bytes) == 0) ?
++	    "IDENTICAL" : "DIFFERENT");
++	if (perr || derr || memcmp(pio_buf, dma_buf, bytes) != 0) {
++		kemmc_adma_on = false;
++		printf("KAGURA eMMC: ADMA2 read path left OFF (self-test failed)\n");
++	}
+ }
+ 
+ static int
+@@ -796,6 +977,16 @@
+ 			return error;
+ 		}
+ 		sweet_early_mark(91, "kagura_emmc_rootdev: GPT parsed");
++		{
++			int want = 1;   /* boot-arg emmcadma=0 keeps PIO */
++
++			(void)PE_parse_boot_argn("emmcadma", &want, sizeof(want));
++			if (want && (emmc_rd32(SDHCI_CAPABILITIES) & (1u << 19))) {
++				kemmc_adma_on = true;
++				printf("KAGURA eMMC: ADMA2 read path armed, self-test next\n");
++				kemmc_adma_selftest();
++			}
++		}
+ 		int bmajor = bdevsw_add(-1, &emmc_bdevsw);
+ 		if (bmajor < 0) {
+ 			return ENXIO;
