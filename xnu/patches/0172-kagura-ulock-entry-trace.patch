@@ -1,0 +1,29 @@
+--- a/bsd/kern/sys_ulock.c
++++ b/bsd/kern/sys_ulock.c
+@@ -168,6 +168,7 @@
+ static void ull_put(ull_t *);
+ 
+ static uint32_t ulock_adaptive_spin_usecs = 20;
++static uint32_t kagura_ulock_trace_count; /* 0172: rate-limited ulock entry trace */
+ 
+ SYSCTL_INT(_kern, OID_AUTO, ulock_adaptive_spin_usecs, CTLFLAG_RW | CTLFLAG_LOCKED,
+     &ulock_adaptive_spin_usecs, 0, "ulock adaptive spin duration");
+@@ -664,6 +666,18 @@
+ 			ret = 0;
+ 		}
+ 		/* owner_thread has a +1 reference */
++		if (strncmp(p->p_comm, "SpringBoard", 11) == 0 &&
++		    kagura_ulock_trace_count < 32) {
++			kagura_ulock_trace_count++;
++			kprintf("KAGURA ULOCK: caller_tid=%llu addr=0x%llx word=0x%x owner_tid=%llu owner_port=0x%x\n",
++			    (unsigned long long)thread_tid(self),
++			    (unsigned long long)args->addr,
++			    (unsigned int)args->value,
++			    (unsigned long long)(owner_thread != THREAD_NULL ?
++			        thread_tid(owner_thread) : 0),
++			    (unsigned int)ulock_owner_value_to_port_name(
++			        (uint32_t)args->value));
++		}
+ 
+ 		/*
+ 		 * At this point, I know:
