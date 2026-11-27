@@ -1,0 +1,26 @@
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1047,12 +1047,21 @@
+ 		if (ss == NULL || !is_saved_state64(ss)) {
+ 			continue;
+ 		}
++		{
++			uint64_t x0 = (uint64_t)saved_state64(ss)->x[0];
++			uint32_t lockword = 0;
++			if (x0 != 0 && (x0 & 7) == 0) {
++				(void)vm_map_read_user(map, x0, &lockword,
++				    sizeof(lockword));
++			}
+ 		fp = get_saved_state_fp(ss);
+ 		n = snprintf(line, sizeof(line),
+-		    "SMP %s t%d st 0x%x we 0x%llx pri %d far 0x%llx esr 0x%x x0 0x%llx x20 0x%llx pc 0x%llx lr 0x%llx sp 0x%llx bt",
++		    "SMP %s t%d st 0x%x we 0x%llx pri %d far 0x%llx esr 0x%x x0 0x%llx x20 0x%llx pc 0x%llx lr 0x%llx sp 0x%llx tid %llu lock 0x%x bt",
+ 		    name, tn++, (unsigned int)thread->state, (uint64_t)thread->wait_event,
+ 		    (int)thread->sched_pri, (uint64_t)saved_state64(ss)->far,
+ 		    (unsigned int)saved_state64(ss)->esr, (uint64_t)saved_state64(ss)->x[0],
+ 		    (uint64_t)saved_state64(ss)->x[20],
+-		    get_saved_state_pc(ss), get_saved_state_lr(ss), get_saved_state_sp(ss));
++		    get_saved_state_pc(ss), get_saved_state_lr(ss), get_saved_state_sp(ss),
++		    (unsigned long long)thread->thread_id, (unsigned int)lockword);
++		}
+ 		for (int i = 0; i < 16 && fp != 0 && (fp & 7) == 0 && n < (int)sizeof(line) - 20; i++) {
