@@ -1,0 +1,28 @@
+--- a/osfmk/ipc/mach_msg.c
++++ b/osfmk/ipc/mach_msg.c
+@@ -1065,6 +1065,7 @@
+  * passed to mach_msg_trap_receive(), so they are honored downstream.
+  * Distinct marker KAGURA SBXPC TIMEOUT: shows exactly which call was cut off. */
+ static uint32_t kagura_sbxpc_timeout_ms = 30000;
++static uint32_t kagura_sbxpc_budget = 512;
+ static uint32_t kagura_sbxpc_timeout_count;
+ static bool kagura_sbxpc_inited;
+ 
+@@ -1080,6 +1081,8 @@
+ 		kagura_sbxpc_inited = true;
+ 		(void)PE_parse_boot_argn("sbxpc_timeout_ms",
+ 		    &kagura_sbxpc_timeout_ms, sizeof(kagura_sbxpc_timeout_ms));
++		(void)PE_parse_boot_argn("sbxpc_budget",
++		    &kagura_sbxpc_budget, sizeof(kagura_sbxpc_budget));
+ 	}
+ 	if ((orig_options & (MACH64_SEND_MSG | MACH64_RCV_MSG)) !=
+ 	    (MACH64_SEND_MSG | MACH64_RCV_MSG))
+@@ -1087,7 +1090,7 @@
+ 	proc_name(proc_selfpid(), pname, (int)sizeof(pname));
+ 	if (strncmp(pname, "SpringBoard", 12) != 0)
+ 		return false;
+-	if (kagura_sbxpc_timeout_count >= 64)
++	if (kagura_sbxpc_timeout_count >= kagura_sbxpc_budget)
+ 		return false;
+ 	kagura_sbxpc_timeout_count++;
+ 	return true;
