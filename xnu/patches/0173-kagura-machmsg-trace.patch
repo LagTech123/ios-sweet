@@ -1,0 +1,130 @@
+--- a/osfmk/ipc/mach_msg.c
++++ b/osfmk/ipc/mach_msg.c
+@@ -113,6 +113,8 @@
+ #include <sys/kdebug.h>
+ #include <sys/proc_ro.h>
+ #include <sys/codesign.h>
++#include <sys/systm.h>
++#include <sys/proc_internal.h>
+ 
+ #include <libkern/coreanalytics/coreanalytics.h>
+ 
+@@ -942,6 +944,90 @@
+ 	return mr;
+ }
+ 
++/* 0173: runtime XPC service-name trace for lsd bootstrap lookups.
++ * The bootstrap MachService name lives only in lsd's process memory; a static
++ * read of plists/strings cannot name it. kprintf is not mirrored to
++ * console-ramoops in this build, so use printf. Budget is 64 messages. */
++static uint32_t kagura_machmsg_trace_count;
++
++static inline uint32_t
++kagura_rd32(const char *p)
++{
++	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
++	    ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++
++static bool
++kagura_has_apple_string(const char *s, int n)
++{
++	int i;
++
++	for (i = 0; i + 10 <= n; i++) {
++		if (strncmp(&s[i], "com.apple.", 10) == 0)
++			return true;
++	}
++	return false;
++}
++
++static void
++kagura_machmsg_trace(user_addr_t msg_addr, uint32_t msgh_bits,
++    uint32_t send_size, uint32_t remote, uint32_t local, uint32_t msgh_id)
++{
++	proc_t p = current_proc();
++	char buf[256];
++	char runbuf[96];
++	int i, j, n, len;
++
++	if (p == PROC_NULL || strncmp(p->p_comm, "lsd", 4) != 0)
++		return;
++	if (msg_addr == 0)
++		return;
++	/* A short message followed by an unmapped page makes a 256-byte copyin
++	 * fail and would silently drop the trace; fall back 256 -> 128 -> 64. */
++	for (len = 256; len >= 64; len /= 2) {
++		if (copyin(msg_addr, buf, (size_t)len) == 0)
++			break;
++	}
++	if (len < 64)
++		return;
++	/* Keep the 64-slot budget for messages carrying an Apple service name,
++	 * not for CFRunLoop receive traffic. */
++	if (!kagura_has_apple_string(buf, len))
++		return;
++	if (kagura_machmsg_trace_count >= 64)
++		return;
++	kagura_machmsg_trace_count++;
++
++	/* mach_msg_overwrite has its header in the user buffer, not in args. */
++	if (remote == 0 && local == 0 && msgh_id == 0) {
++		remote  = kagura_rd32(&buf[8]);
++		local   = kagura_rd32(&buf[12]);
++		msgh_id = kagura_rd32(&buf[20]);
++		msgh_bits = kagura_rd32(&buf[0]);
++	}
++	printf("KAGURA MACHMSG: tid=%llu bits=0x%x sz=%u remote=0x%x local=0x%x id=0x%x\n",
++	    (unsigned long long)thread_tid(current_thread()), msgh_bits,
++	    send_size, remote, local, msgh_id);
++
++	for (i = 0; i < len; ) {
++		if (buf[i] < 0x20 || buf[i] >= 0x7f) {
++			i++;
++			continue;
++		}
++		j = i;
++		while (i < len && buf[i] >= 0x20 && buf[i] < 0x7f)
++			i++;
++		n = i - j;
++		if (n < 5)
++			continue;
++		if (n > (int)sizeof(runbuf) - 1)
++			n = (int)sizeof(runbuf) - 1;
++		memcpy(runbuf, buf + j, (size_t)n);
++		runbuf[n] = '\0';
++		printf("KAGURA MACHMSG:  run '%s'\n", runbuf);
++	}
++}
++
+ /*
+  *  Routine:    mach_msg_overwrite_trap [mach trap]
+  *  Purpose:
+@@ -975,6 +1061,11 @@
+ 	mach_vm_address_t       rcv_msg_addr = args->rcv_msg;
+ 
+ 	mach_msg_user_header_t  user_header = {};
++	/* 0173: trace lsd's XPC bootstrap lookups at trap entry */
++	if (args->option & MACH_SEND_MSG) {
++		kagura_machmsg_trace((user_addr_t)args->msg, 0,
++		    (uint32_t)args->send_size, 0, 0, 0);
++	}
+ 	mach_msg_size_t         desc_count = 0;
+ 	mach_port_name_t        sync_send = MACH_PORT_NULL;
+ 
+@@ -1105,6 +1196,15 @@
+ 	mach_msg_return_t  mr = MACH_MSG_SUCCESS;
+ 
+ 	mach_msg_user_header_t user_header = {};
++	/* 0173: trace lsd's XPC bootstrap lookups at trap entry */
++	if (args->options & MACH64_SEND_MSG) {
++		kagura_machmsg_trace((user_addr_t)args->data,
++		    (uint32_t)args->msgh_bits_and_send_size,
++		    (uint32_t)(args->msgh_bits_and_send_size >> 32),
++		    (uint32_t)args->msgh_remote_and_local_port,
++		    (uint32_t)(args->msgh_remote_and_local_port >> 32),
++		    (uint32_t)(args->msgh_voucher_and_id >> 32));
++	}
+ 	mach_msg_vector_t msg_vec = {}, aux_vec = {};         /* zeroed */
+ 
+ 	option64 &= MACH64_MSG_OPTION_USER;
