@@ -1,0 +1,89 @@
+--- a/osfmk/ipc/mach_msg.c
++++ b/osfmk/ipc/mach_msg.c
+@@ -1058,6 +1058,41 @@
+ 	}
+ }
+ 
++/* 0184: fail-fast timeout for SpringBoard's synchronous XPC calls.
++ * Boot arg sbxpc_timeout_ms= (default 30000). This XNU has MACH64_RCV_TIMEOUT
++ * but NO MACH64_RCV_TIMEO_IN_NANOSECONDS; mach_msg2_trap_args carries
++ * `timeout` (milliseconds), not `receive_timeout`. Both overrides below are
++ * passed to mach_msg_trap_receive(), so they are honored downstream.
++ * Distinct marker KAGURA SBXPC TIMEOUT: shows exactly which call was cut off. */
++static uint32_t kagura_sbxpc_timeout_ms = 30000;
++static uint32_t kagura_sbxpc_timeout_count;
++static bool kagura_sbxpc_inited;
++
++extern boolean_t PE_parse_boot_argn(const char *arg_string, void *arg_ptr,
++    int max_arg);
++
++static bool
++kagura_sbxpc_want(uint64_t orig_options)
++{
++	char pname[32];
++
++	if (!kagura_sbxpc_inited) {
++		kagura_sbxpc_inited = true;
++		(void)PE_parse_boot_argn("sbxpc_timeout_ms",
++		    &kagura_sbxpc_timeout_ms, sizeof(kagura_sbxpc_timeout_ms));
++	}
++	if ((orig_options & (MACH64_SEND_MSG | MACH64_RCV_MSG)) !=
++	    (MACH64_SEND_MSG | MACH64_RCV_MSG))
++		return false;
++	proc_name(proc_selfpid(), pname, (int)sizeof(pname));
++	if (strncmp(pname, "SpringBoard", 12) != 0)
++		return false;
++	if (kagura_sbxpc_timeout_count >= 64)
++		return false;
++	kagura_sbxpc_timeout_count++;
++	return true;
++}
++
+ /*
+  *  Routine:    mach_msg_overwrite_trap [mach trap]
+  *  Purpose:
+@@ -1109,6 +1144,24 @@
+ 	 */
+ 	filter_nonfatal = (option32 & MACH_SEND_FILTER_NONFATAL);
+ 	option32 &= ~MACH_SEND_FILTER_NONFATAL;
++	/* 0184: fail-fast SpringBoard sync XPC receive */
++	if (kagura_sbxpc_want((uint64_t)args->option)) {
++		uint32_t sb_remote = 0, sb_local = 0, sb_id = 0;
++		char sb_hdr[24];
++
++		if (copyin((user_addr_t)args->msg, sb_hdr, sizeof(sb_hdr)) == 0) {
++			sb_remote = kagura_rd32(&sb_hdr[8]);
++			sb_local = kagura_rd32(&sb_hdr[12]);
++			sb_id = kagura_rd32(&sb_hdr[20]);
++		}
++		printf("KAGURA SBXPC TIMEOUT: tid=%llu remote=0x%x local=0x%x id=0x%x origopts=0x%x origtmo=%u newtmo=%u\n",
++		    (unsigned long long)thread_tid(current_thread()),
++		    sb_remote, sb_local, sb_id, (unsigned int)args->option,
++		    (unsigned int)args->timeout,
++		    (unsigned int)kagura_sbxpc_timeout_ms);
++		option32 |= MACH_RCV_TIMEOUT;
++		msg_timeout = (mach_msg_timeout_t)kagura_sbxpc_timeout_ms;
++	}
+ 
+ 	KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
+ 
+@@ -1253,6 +1306,19 @@
+ 	filter_nonfatal = (option64 & MACH64_SEND_FILTER_NONFATAL);
+ 	option64 &= ~MACH64_SEND_FILTER_NONFATAL;
+ 	vector_msg = (option64 & MACH64_MSG_VECTOR);
++	/* 0184: fail-fast SpringBoard sync XPC receive */
++	if (kagura_sbxpc_want(args->options)) {
++		printf("KAGURA SBXPC TIMEOUT: tid=%llu remote=0x%x local=0x%x id=0x%x origopts=0x%llx origtmo=%u newtmo=%u\n",
++		    (unsigned long long)thread_tid(current_thread()),
++		    (uint32_t)args->msgh_remote_and_local_port,
++		    (uint32_t)(args->msgh_remote_and_local_port >> 32),
++		    (uint32_t)(args->msgh_voucher_and_id >> 32),
++		    (unsigned long long)args->options,
++		    (unsigned int)args->timeout,
++		    (unsigned int)kagura_sbxpc_timeout_ms);
++		option64 |= MACH64_RCV_TIMEOUT;
++		msg_timeout = (mach_msg_timeout_t)kagura_sbxpc_timeout_ms;
++	}
+ 
+ 	KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
+ 
