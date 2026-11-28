@@ -1,14 +1,16 @@
 --- a/osfmk/ipc/mach_msg.c
 +++ b/osfmk/ipc/mach_msg.c
-@@ -942,6 +942,94 @@
+@@ -942,6 +942,104 @@
  	return mr;
  }
  
-+/* 0173: runtime XPC service-name trace for lsd bootstrap lookups.
-+ * The bootstrap MachService name lives only in lsd's process memory; a static
-+ * read of plists/strings cannot name it. kprintf is not mirrored to
-+ * console-ramoops in this build, so use printf. Budget is 64 messages. */
-+static uint32_t kagura_machmsg_trace_count;
++/* 0180: runtime XPC service-name trace, gated to SpringBoard and lsd.
++ * The service name for SpringBoard's blocked synchronous XPC request lives only
++ * in its process memory; a static read of plists/strings cannot name it.
++ * kprintf is not mirrored to console-ramoops, so use printf. Separate budgets:
++ * SpringBoard 64, lsd 8 (so SpringBoard's slots cannot be stolen by lsd). */
++static uint32_t kagura_machmsg_sb_count;
++static uint32_t kagura_machmsg_lsd_count;
 +
 +extern int proc_selfpid(void);
 +extern void proc_name(int pid, char *buf, int size);
@@ -39,11 +41,23 @@
 +	char pname[32];
 +	char buf[256];
 +	char runbuf[96];
++	const char *proc;
 +	int i, j, n, len;
 +
 +	proc_name(proc_selfpid(), pname, (int)sizeof(pname));
-+	if (strncmp(pname, "lsd", 4) != 0)
++	if (strncmp(pname, "SpringBoard", 12) == 0) {
++		proc = "SpringBoard";
++		if (kagura_machmsg_sb_count >= 64)
++			return;
++		kagura_machmsg_sb_count++;
++	} else if (strncmp(pname, "lsd", 4) == 0) {
++		proc = "lsd";
++		if (kagura_machmsg_lsd_count >= 8)
++			return;
++		kagura_machmsg_lsd_count++;
++	} else {
 +		return;
++	}
 +	if (msg_addr == 0)
 +		return;
 +	/* A short message followed by an unmapped page makes a 256-byte copyin
@@ -54,13 +68,9 @@
 +	}
 +	if (len < 64)
 +		return;
-+	/* Keep the 64-slot budget for messages carrying an Apple service name,
-+	 * not for CFRunLoop receive traffic. */
++	/* Only messages carrying an Apple service name: no CFRunLoop traffic. */
 +	if (!kagura_has_apple_string(buf, len))
 +		return;
-+	if (kagura_machmsg_trace_count >= 64)
-+		return;
-+	kagura_machmsg_trace_count++;
 +
 +	/* mach_msg_overwrite has its header in the user buffer, not in args. */
 +	if (remote == 0 && local == 0 && msgh_id == 0) {
@@ -69,8 +79,8 @@
 +		msgh_id = kagura_rd32(&buf[20]);
 +		msgh_bits = kagura_rd32(&buf[0]);
 +	}
-+	printf("KAGURA MACHMSG: tid=%llu bits=0x%x sz=%u remote=0x%x local=0x%x id=0x%x\n",
-+	    (unsigned long long)thread_tid(current_thread()), msgh_bits,
++	printf("KAGURA MACHMSG: proc=%s tid=%llu bits=0x%x sz=%u remote=0x%x local=0x%x id=0x%x\n",
++	    proc, (unsigned long long)thread_tid(current_thread()), msgh_bits,
 +	    send_size, remote, local, msgh_id);
 +
 +	for (i = 0; i < len; ) {
@@ -88,18 +98,18 @@
 +			n = (int)sizeof(runbuf) - 1;
 +		memcpy(runbuf, buf + j, (size_t)n);
 +		runbuf[n] = '\0';
-+		printf("KAGURA MACHMSG:  run '%s'\n", runbuf);
++		printf("KAGURA MACHMSG:  proc=%s run '%s'\n", proc, runbuf);
 +	}
 +}
 +
  /*
   *  Routine:    mach_msg_overwrite_trap [mach trap]
   *  Purpose:
-@@ -975,6 +1063,11 @@
+@@ -975,6 +1073,11 @@
  	mach_vm_address_t       rcv_msg_addr = args->rcv_msg;
  
  	mach_msg_user_header_t  user_header = {};
-+	/* 0173: trace lsd's XPC bootstrap lookups at trap entry */
++	/* 0180: trace SpringBoard/lsd XPC service names at trap entry */
 +	if (args->option & MACH_SEND_MSG) {
 +		kagura_machmsg_trace((user_addr_t)args->msg, 0,
 +		    (uint32_t)args->send_size, 0, 0, 0);
@@ -107,11 +117,11 @@
  	mach_msg_size_t         desc_count = 0;
  	mach_port_name_t        sync_send = MACH_PORT_NULL;
  
-@@ -1105,6 +1198,15 @@
+@@ -1105,6 +1208,15 @@
  	mach_msg_return_t  mr = MACH_MSG_SUCCESS;
  
  	mach_msg_user_header_t user_header = {};
-+	/* 0173: trace lsd's XPC bootstrap lookups at trap entry */
++	/* 0180: trace SpringBoard/lsd XPC service names at trap entry */
 +	if (args->options & MACH64_SEND_MSG) {
 +		kagura_machmsg_trace((user_addr_t)args->data,
 +		    (uint32_t)args->msgh_bits_and_send_size,
