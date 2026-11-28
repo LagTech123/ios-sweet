@@ -1,0 +1,78 @@
+--- a/osfmk/ipc/mach_msg.c
++++ b/osfmk/ipc/mach_msg.c
+@@ -900,6 +900,24 @@
+ 		return mr;
+ 	}
+ 	/* hold ref for object */
++	/* 0188: for SpringBoard's forced-timeout receives, report whether a reply
++	 * is already queued on the local receive port. If queued>0, the reply is
++	 * present and this is a receive/wakeup bug, not a missing service. */
++	{
++		extern int proc_selfpid(void);
++		extern void proc_name(int pid, char *buf, int size);
++		char mqname[32];
++
++		proc_name(proc_selfpid(), mqname, (int)sizeof(mqname));
++		if (strncmp(mqname, "SpringBoard", 12) == 0 &&
++		    (option64 & MACH64_RCV_TIMEOUT)) {
++			ipc_port_t mqport = ip_object_to_port(object);
++			printf("KAGURA MQ: tid=%llu rcv=0x%x msgcount=%u empty=%d\n",
++			    (unsigned long long)thread_tid(self), rcv_name,
++			    (unsigned int)mqport->ip_messages.imq_msgcount,
++			    ipc_kmsg_queue_empty(&mqport->ip_messages.imq_messages));
++		}
++	}
+ 
+ 	if (sync_send != MACH_PORT_NULL) {
+ 		ipc_port_t special_reply_port = ip_object_to_port(object);
+@@ -950,6 +968,7 @@
+  * pstore because kprintf is not mirrored in this build. */
+ static uint32_t kagura_machmsg_sb_count;
+ static uint32_t kagura_machmsg_lsd_count;
++static uint32_t kagura_machmsg_lnd_count;
+ 
+ extern int proc_selfpid(void);
+ extern void proc_name(int pid, char *buf, int size);
+@@ -982,7 +1001,7 @@
+ 	char buf[256];
+ 	char runbuf[96];
+ 	const char *proc;
+-	bool is_sb, printed = false;
++	bool is_sb, is_lnd, printed = false;
+ 	int i, j, n, len;
+ 
+ 	proc_name(proc_selfpid(), pname, (int)sizeof(pname));
+@@ -996,6 +1015,15 @@
+ 		 * mach_msg with BOTH send and receive options set. */
+ 		if (!combined)
+ 			return;
++	} else if (strncmp(pname, "launchd", 8) == 0) {
++		/* 0188: MIG lookup replies have no printable body, so log
++		 * launchd sends unconditionally with forced hex. */
++		proc = "launchd";
++		is_sb = false;
++		is_lnd = true;
++		if (kagura_machmsg_lnd_count >= 256)
++			return;
++		kagura_machmsg_lnd_count++;
+ 	} else if (strncmp(pname, "lsd", 4) == 0) {
+ 		proc = "lsd";
+ 		is_sb = false;
+@@ -1016,7 +1044,7 @@
+ 	if (len < 64)
+ 		return;
+ 	/* lsd keeps the original content filter; SpringBoard does not. */
+-	if (!is_sb && !kagura_has_apple_string(buf, len))
++	if (!is_sb && !is_lnd && !kagura_has_apple_string(buf, len))
+ 		return;
+ 
+ 	/* mach_msg_overwrite has its header in the user buffer, not in args. */
+@@ -1050,7 +1078,7 @@
+ 	}
+ 	/* A sync call with no printable service name still needs to be
+ 	 * identifiable, so show the first 32 bytes. */
+-	if (!printed) {
++	if (!printed || is_lnd) {
+ 		printf("KAGURA MACHMSG:  proc=%s hex:", proc);
+ 		for (i = 0; i < 32 && i < len; i++)
+ 			printf(" %02x", (unsigned char)buf[i]);
