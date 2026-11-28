@@ -1,0 +1,53 @@
+--- a/osfmk/ipc/mach_msg.c
++++ b/osfmk/ipc/mach_msg.c
+@@ -888,6 +888,7 @@
+ 	mach_port_name_t    rcv_name)
+ {
+ 	ipc_object_t object;
++	ipc_port_t kagura_rcv_port = IP_NULL;
+ 
+ 	thread_t           self = current_thread();
+ 	ipc_space_t        space = current_space();
+@@ -897,6 +898,17 @@
+ 
+ 	mr = ipc_mqueue_copyin(space, rcv_name, &object);
+ 	if (mr != MACH_MSG_SUCCESS) {
++		/* 0191: SpringBoard receive-right lookup failure (dead name / no entry). */
++		{
++			extern int proc_selfpid(void);
++			extern void proc_name(int pid, char *buf, int size);
++			char qfname[32];
++
++			proc_name(proc_selfpid(), qfname, (int)sizeof(qfname));
++			if (strncmp(qfname, "SpringBoard", 12) == 0)
++				printf("KAGURA MQFAIL: tid=%llu rcv=0x%x mr=0x%x\n",
++				    (unsigned long long)thread_tid(self), rcv_name, mr);
++		}
+ 		return mr;
+ 	}
+ 	/* hold ref for object */
+@@ -912,8 +924,10 @@
+ 		if (strncmp(mqname, "SpringBoard", 12) == 0 &&
+ 		    (option64 & MACH64_RCV_TIMEOUT)) {
+ 			ipc_port_t mqport = ip_object_to_port(object);
+-			printf("KAGURA MQ: tid=%llu rcv=0x%x msgcount=%u empty=%d\n",
++			kagura_rcv_port = mqport;
++			printf("KAGURA MQ: tid=%llu rcv=0x%x port=0x%llx msgcount=%u empty=%d\n",
+ 			    (unsigned long long)thread_tid(self), rcv_name,
++			    (unsigned long long)mqport,
+ 			    (unsigned int)mqport->ip_messages.imq_msgcount,
+ 			    ipc_kmsg_queue_empty(&mqport->ip_messages.imq_messages));
+ 		}
+@@ -955,6 +969,12 @@
+ 	}
+ 
+ 	mr = mach_msg_receive_results();
++	/* 0191: actual outcome (0 = success, 0x10004003 = MACH_RCV_TIMED_OUT). */
++	if (kagura_rcv_port != IP_NULL) {
++		printf("KAGURA MR: tid=%llu rcv=0x%x port=0x%llx mr=0x%x\n",
++		    (unsigned long long)thread_tid(self), rcv_name,
++		    (unsigned long long)kagura_rcv_port, mr);
++	}
+ 	/* release ref on ith_object */
+ 
+ 	return mr;
